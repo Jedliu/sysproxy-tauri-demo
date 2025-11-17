@@ -1,0 +1,14 @@
+[package]
+name = "sysproxy-tauri-demo"
+version = "0.1.0"
+description = "Minimal Tauri app to set system proxy"
+edition = "2021"
+
+[dependencies]
+sysproxy = { git = "https://github.com/clash-verge-rev/sysproxy-rs" }
+tauri = { version = "2.9.2", features = ["wry"] }
+once_cell = "1.19.0"
+serde = { version = "1.0.188", features = ["derive"] }
+
+[build-dependencies]
+tauri-build = { version = "2.5.1", features = [] }

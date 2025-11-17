@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Sysproxy Demo</title>
+    <style>
+      :root {
+        font-family:
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-weight: 600;
+      }
+      input {
+        padding: 8px 10px;
+        font-size: 14px;
+        border-radius: 6px;
+        border: 1px solid #ccc;
+      }
+      button {
+        padding: 10px 14px;
+        font-size: 14px;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        background: #2563eb;
+        color: #fff;
+      }
+      button.secondary {
+        background: #6b7280;
+      }
+      #status {
+        min-height: 20px;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>设置系统代理</h2>
+    <label>
+      代理 IP
+      <input id="host" placeholder="例如 127.0.0.1" value="127.0.0.1" />
+    </label>
+    <label>
+      代理端口
+      <input id="port" type="number" placeholder="例如 7890" value="7890" />
+    </label>
+    <div style="display: flex; gap: 10px">
+      <button id="apply">应用代理</button>
+      <button id="restore" class="secondary">恢复原代理</button>
+    </div>
+    <label>
+      原代理配置（JSON，首次保存后显示）
+      <textarea
+        id="saved"
+        rows="12"
+        readonly
+        style="
+          width: 100%;
+          font-family:
+            ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+            &quot;Liberation Mono&quot;, &quot;Courier New&quot;, monospace;
+        "
+      ></textarea>
+    </label>
+    <label>
+      当前系统代理（JSON）
+      <div style="display: flex; gap: 8px; align-items: center">
+        <button id="current">获取当前代理</button>
+        <span
+          id="current-status"
+          style="font-size: 12px; color: #6b7280"
+        ></span>
+      </div>
+      <textarea
+        id="current-text"
+        rows="12"
+        readonly
+        style="
+          width: 100%;
+          font-family:
+            ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+            &quot;Liberation Mono&quot;, &quot;Courier New&quot;, monospace;
+        "
+      ></textarea>
+    </label>
+    <div id="status"></div>
+
+    <script type="module">
+      const hostInput = document.getElementById("host");
+      const portInput = document.getElementById("port");
+      const status = document.getElementById("status");
+
+      const renderStatus = (text, isError = false) => {
+        status.textContent = text;
+        status.style.color = isError ? "#dc2626" : "#16a34a";
+      };
+
+      const renderSaved = (data) => {
+        const saved = document.getElementById("saved");
+        saved.value = data ? JSON.stringify(data, null, 2) : "";
+      };
+
+      const renderCurrent = (data, msg = "") => {
+        const el = document.getElementById("current-text");
+        el.value = data ? JSON.stringify(data, null, 2) : "";
+        const st = document.getElementById("current-status");
+        st.textContent = msg;
+      };
+
+      const refreshSaved = async () => {
+        const invoke = await getInvoke();
+        if (!invoke) return;
+        try {
+          const data = await invoke("get_saved_proxy");
+          renderSaved(data);
+        } catch (e) {
+          console.warn("get_saved_proxy failed", e);
+        }
+      };
+
+      const getInvoke = async () => {
+        if (window.__TAURI__?.core?.invoke) return window.__TAURI__.core.invoke;
+        const candidates = [
+          "tauri://localhost/.tauri/api.js",
+          "/.tauri/api.js",
+        ];
+        for (const url of candidates) {
+          try {
+            const api = await import(url);
+            if (api?.invoke) return api.invoke;
+          } catch (e) {
+            console.warn("load tauri api failed", url, e);
+          }
+        }
+        renderStatus("未检测到 Tauri 注入，请用 `pnpm dev` 启动", true);
+        return null;
+      };
+
+      document.getElementById("apply").addEventListener("click", async () => {
+        const invoke = await getInvoke();
+        if (!invoke) return;
+        const host = hostInput.value.trim();
+        const port = Number(portInput.value);
+        if (!host || Number.isNaN(port) || port <= 0 || port > 65535) {
+          renderStatus("请输入合法的 IP 和端口（1-65535）", true);
+          return;
+        }
+        renderStatus("正在设置...");
+        try {
+          await invoke("set_system_proxy", { host, port });
+          renderStatus(`已设置系统代理为 ${host}:${port}`);
+          refreshSaved();
+        } catch (e) {
+          console.error(e);
+          renderStatus(`设置失败：${e}`, true);
+        }
+      });
+
+      document.getElementById("restore").addEventListener("click", async () => {
+        const invoke = await getInvoke();
+        if (!invoke) return;
+        renderStatus("正在恢复原代理/关闭代理...");
+        try {
+          await invoke("restore_system_proxy");
+          renderStatus("已恢复原代理（若无记录则已关闭）");
+          refreshSaved();
+        } catch (e) {
+          console.error(e);
+          renderStatus(`恢复失败：${e}`, true);
+        }
+      });
+
+      document.getElementById("current").addEventListener("click", async () => {
+        const invoke = await getInvoke();
+        if (!invoke) return;
+        renderCurrent(null, "获取中...");
+        try {
+          const data = await invoke("get_current_proxy");
+          renderCurrent(data, "已获取");
+        } catch (e) {
+          console.error(e);
+          renderCurrent(null, "获取失败");
+        }
+      });
+
+      refreshSaved();
+    </script>
+  </body>
+</html>
