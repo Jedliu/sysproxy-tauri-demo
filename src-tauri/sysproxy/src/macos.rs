@@ -1,0 +1,478 @@
+use crate::{Autoproxy, Error, Result, Sysproxy};
+use log::debug;
+use std::{process::Command, str::from_utf8};
+
+impl Sysproxy {
+    #[inline]
+    pub fn get_system_proxy() -> Result<Sysproxy> {
+        let service = default_network_service().or_else(|e| {
+            debug!("Failed to get network service: {:?}", e);
+            default_network_service_by_ns()
+        });
+        let service = match service {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("Failed to get network service by networksetup: {:?}", e);
+                return Err(e);
+            }
+        };
+        let service_owned = service;
+        let service = service_owned.as_str();
+
+        let mut socks = Sysproxy::get_socks(service)?;
+        debug!("Getting SOCKS proxy: {:?}", socks);
+
+        let http = Sysproxy::get_http(service)?;
+        debug!("Getting HTTP proxy: {:?}", http);
+
+        let https = Sysproxy::get_https(service)?;
+        debug!("Getting HTTPS proxy: {:?}", https);
+
+        let bypass = Sysproxy::get_bypass(service)?;
+        debug!("Getting bypass domains: {:?}", bypass);
+
+        socks.bypass = bypass;
+
+        if !socks.enable {
+            if http.enable {
+                socks.enable = true;
+                socks.host = http.host;
+                socks.port = http.port;
+            }
+            if https.enable {
+                socks.enable = true;
+                socks.host = https.host;
+                socks.port = https.port;
+            }
+        }
+
+        Ok(socks)
+    }
+
+    #[inline]
+    pub fn set_system_proxy(&self) -> Result<()> {
+        let service = default_network_service().or_else(|e| {
+            debug!("Failed to get network service: {:?}", e);
+            default_network_service_by_ns()
+        });
+        let service = match service {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("Failed to get network service by networksetup: {:?}", e);
+                return Err(e);
+            }
+        };
+        let service_owned = service;
+        let service = service_owned.as_str();
+
+        debug!("Use network service: {}", service);
+
+        debug!("Setting SOCKS proxy");
+        self.set_socks(service)?;
+
+        debug!("Setting HTTP proxy");
+        self.set_https(service)?;
+
+        debug!("Setting HTTPS proxy");
+        self.set_http(service)?;
+
+        debug!("Setting bypass domains");
+        self.set_bypass(service)?;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn get_http(service: &str) -> Result<Sysproxy> {
+        get_proxy(ProxyType::Http, service)
+    }
+
+    #[inline]
+    pub fn get_https(service: &str) -> Result<Sysproxy> {
+        get_proxy(ProxyType::Https, service)
+    }
+
+    #[inline]
+    pub fn get_socks(service: &str) -> Result<Sysproxy> {
+        get_proxy(ProxyType::Socks, service)
+    }
+
+    #[inline]
+    pub fn get_bypass(service: &str) -> Result<String> {
+        let bypass_output = Command::new("networksetup")
+            .args(["-getproxybypassdomains", service])
+            .output()?;
+
+        let bypass = from_utf8(&bypass_output.stdout)
+            .map_err(|_| Error::ParseStr("bypass".into()))?
+            .split('\n')
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<&str>>()
+            .join(",");
+
+        Ok(bypass)
+    }
+
+    #[inline]
+    pub fn set_http(&self, service: &str) -> Result<()> {
+        set_proxy(self, ProxyType::Http, service)
+    }
+
+    #[inline]
+    pub fn set_https(&self, service: &str) -> Result<()> {
+        set_proxy(self, ProxyType::Https, service)
+    }
+
+    #[inline]
+    pub fn set_socks(&self, service: &str) -> Result<()> {
+        set_proxy(self, ProxyType::Socks, service)
+    }
+
+    #[inline]
+    pub fn set_bypass(&self, service: &str) -> Result<()> {
+        let domains = self.bypass.split(",").collect::<Vec<_>>();
+        networksetup()
+            .args([["-setproxybypassdomains", service].to_vec(), domains].concat())
+            .status()?;
+        Ok(())
+    }
+}
+
+impl Autoproxy {
+    #[inline]
+    pub fn get_auto_proxy() -> Result<Autoproxy> {
+        let service = default_network_service().or_else(|e| {
+            debug!("Failed to get network service: {:?}", e);
+            default_network_service_by_ns()
+        });
+        let service = match service {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("Failed to get network service by networksetup: {:?}", e);
+                return Err(e);
+            }
+        };
+        let service_owned = service;
+        let service = service_owned.as_str();
+
+        let auto_output = networksetup()
+            .args(["-getautoproxyurl", service])
+            .output()?;
+        let auto = from_utf8(&auto_output.stdout)
+            .map_err(|_| Error::ParseStr("auto".into()))?
+            .trim()
+            .split_once('\n')
+            .ok_or_else(|| Error::ParseStr("auto".into()))?;
+        let url = strip_str(auto.0.strip_prefix("URL: ").unwrap_or(""));
+        let enable = auto.1 == "Enabled: Yes";
+
+        Ok(Autoproxy {
+            enable,
+            url: url.to_string(),
+        })
+    }
+
+    #[inline]
+    pub fn set_auto_proxy(&self) -> Result<()> {
+        let service = default_network_service().or_else(|e| {
+            debug!("Failed to get network service: {:?}", e);
+            default_network_service_by_ns()
+        });
+        let service = match service {
+            Ok(s) => s,
+            Err(e) => {
+                debug!("Failed to get network service by networksetup: {:?}", e);
+                return Err(e);
+            }
+        };
+        let service_owned = service;
+        let service = service_owned.as_str();
+
+        let enable = if self.enable { "on" } else { "off" };
+        let url = if self.url.is_empty() {
+            "\"\""
+        } else {
+            &self.url
+        };
+        networksetup()
+            .args(["-setautoproxyurl", service, url])
+            .status()?;
+        networksetup()
+            .args(["-setautoproxystate", service, enable])
+            .status()?;
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+enum ProxyType {
+    Http,
+    Https,
+    Socks,
+}
+
+impl ProxyType {
+    #[inline]
+    fn to_target(&self) -> &'static str {
+        match self {
+            ProxyType::Http => "webproxy",
+            ProxyType::Https => "securewebproxy",
+            ProxyType::Socks => "socksfirewallproxy",
+        }
+    }
+}
+
+#[inline]
+fn networksetup() -> Command {
+    Command::new("networksetup")
+}
+
+#[inline]
+fn set_proxy(proxy: &Sysproxy, proxy_type: ProxyType, service: &str) -> Result<()> {
+    let target = format!("-set{}", proxy_type.to_target());
+    let target = target.as_str();
+
+    let host = proxy.host.as_str();
+    let port = format!("{}", proxy.port);
+    let port = port.as_str();
+
+    networksetup()
+        .args([target, service, host, port])
+        .status()?;
+
+    let target_state = format!("-set{}state", proxy_type.to_target());
+    let enable = if proxy.enable { "on" } else { "off" };
+
+    networksetup()
+        .args([target_state.as_str(), service, enable])
+        .status()?;
+
+    Ok(())
+}
+
+#[inline]
+fn get_proxy(proxy_type: ProxyType, service: &str) -> Result<Sysproxy> {
+    let target = format!("-get{}", proxy_type.to_target());
+    let target = target.as_str();
+
+    let output = networksetup().args([target, service]).output()?;
+
+    let stdout = from_utf8(&output.stdout).map_err(|_| Error::ParseStr("output".into()))?;
+    let enable = parse(stdout, "Enabled:");
+    let enable = enable == "Yes";
+
+    let host = parse(stdout, "Server:");
+    let host = host.into();
+
+    let port = parse(stdout, "Port:");
+    let port = port.parse().map_err(|_| Error::ParseStr("port".into()))?;
+
+    Ok(Sysproxy {
+        enable,
+        host,
+        port,
+        bypass: "".into(),
+    })
+}
+
+#[inline]
+fn parse<'a>(target: &'a str, key: &'a str) -> &'a str {
+    match target.find(key) {
+        Some(idx) => {
+            let idx = idx + key.len();
+            let value = &target[idx..];
+            let value = match value.find("\n") {
+                Some(end) => &value[..end],
+                None => value,
+            };
+            value.trim()
+        }
+        None => "",
+    }
+}
+
+#[inline]
+fn strip_str(text: &str) -> &str {
+    text.strip_prefix('"')
+        .unwrap_or(text)
+        .strip_suffix('"')
+        .unwrap_or(text)
+}
+
+#[inline]
+fn default_network_service() -> Result<String> {
+    // 默认路由获取活跃接口
+    if let Ok(service) = get_service_by_default_route() {
+        debug!("Found service by default route: {}", service);
+        return Ok(service);
+    }
+
+    // 检查常见的活跃网络服务
+    if let Ok(service) = get_service_by_active_connection() {
+        debug!("Found service by active connection: {}", service);
+        return Ok(service);
+    }
+
+    debug!("All methods failed, falling back to default_network_service_by_ns");
+    Err(Error::NetworkInterface)
+}
+
+#[inline]
+fn get_service_by_default_route() -> Result<String> {
+    let output = Command::new("route").args(["get", "default"]).output()?;
+
+    let stdout = from_utf8(&output.stdout).map_err(|_| Error::ParseStr("route output".into()))?;
+    let mut interface_name = None;
+
+    for line in stdout.lines() {
+        if line.trim().starts_with("interface:") {
+            if let Some(v) = line.split(':').nth(1) {
+                interface_name = Some(v.trim().to_string());
+            }
+            break;
+        }
+    }
+
+    if let Some(interface) = interface_name {
+        debug!("Default route interface: {}", interface);
+        return get_server_by_order(interface);
+    }
+
+    Err(Error::NetworkInterface)
+}
+
+#[inline]
+fn get_service_by_active_connection() -> Result<String> {
+    let services = ["Wi-Fi", "Ethernet", "USB 10/100/1000 LAN"];
+
+    for service in services {
+        // 检查服务是否存在且有活跃连接
+        let output = Command::new("networksetup")
+            .args(["-getinfo", service])
+            .output();
+
+        if let Ok(output) = output {
+            let stdout =
+                from_utf8(&output.stdout).map_err(|_| Error::ParseStr("getinfo output".into()))?;
+            if !stdout.contains("** Error:") {
+                // 检查是否有有效的IP地址
+                for line in stdout.lines() {
+                    if line.starts_with("IP address:")
+                        && let Some(ip_raw) = line.split(':').nth(1)
+                    {
+                        let ip = ip_raw.trim();
+                        if !ip.is_empty() && ip != "none" {
+                            debug!("Found active service with IP: {} - {}", service, ip);
+                            return Ok(service.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Err(Error::NetworkInterface)
+}
+
+#[inline]
+fn default_network_service_by_ns() -> Result<String> {
+    let output = networksetup().arg("-listallnetworkservices").output()?;
+    let stdout = from_utf8(&output.stdout).map_err(|_| Error::ParseStr("output".into()))?;
+    let mut lines = stdout.split('\n');
+    lines.next(); // ignore the tips
+
+    // get the first service
+    match lines.next() {
+        Some(line) => Ok(line.into()),
+        None => Err(Error::NetworkInterface),
+    }
+}
+
+// #[inline]
+// #[allow(dead_code)]
+// fn get_service_by_device(device: String) -> Result<String> {
+//     let output = networksetup().arg("-listallhardwareports").output()?;
+//     let stdout = from_utf8(&output.stdout).map_err(|_| Error::ParseStr("output".into()))?;
+
+//     let hardware = stdout.split("Ethernet Address:").find_map(|s| {
+//         let lines = s.split("\n");
+//         let mut hardware = None;
+//         let mut device_ = None;
+
+//         for line in lines {
+//             if line.starts_with("Hardware Port:") {
+//                 hardware = Some(&line[15..]);
+//             }
+//             if line.starts_with("Device:") {
+//                 device_ = Some(&line[8..])
+//             }
+//         }
+
+//         if device == device_? { hardware } else { None }
+//     });
+
+//     match hardware {
+//         Some(hardware) => Ok(hardware.into()),
+//         None => Err(Error::NetworkInterface),
+//     }
+// }
+
+#[inline]
+fn get_server_by_order(device: String) -> Result<String> {
+    let services = listnetworkserviceorder()?;
+    let service = services
+        .into_iter()
+        .find(|(_, _, d)| d == &device)
+        .map(|(s, _, _)| s);
+    match service {
+        Some(service) => Ok(service),
+        None => Err(Error::NetworkInterface),
+    }
+}
+
+#[inline]
+fn listnetworkserviceorder() -> Result<Vec<(String, String, String)>> {
+    let output = networksetup().arg("-listnetworkserviceorder").output()?;
+    let stdout = from_utf8(&output.stdout).map_err(|_| Error::ParseStr("output".into()))?;
+
+    let mut lines = stdout.split('\n');
+    lines.next(); // ignore the tips
+
+    let mut services = Vec::new();
+    let mut p: Option<(String, String, String)> = None;
+
+    for line in lines {
+        if !line.starts_with("(") {
+            continue;
+        }
+
+        if p.is_none() {
+            if let Some(ri) = line.find(")") {
+                let service = line[ri + 1..].trim();
+                p = Some((service.into(), "".into(), "".into()));
+            }
+        } else {
+            let line_inner = &line[1..line.len() - 1];
+            if let (Some(pi), Some(di)) = (line_inner.find("Port:"), line_inner.find(", Device:")) {
+                let port = line_inner[pi + 5..di].trim();
+                let device = line_inner[di + 9..].trim();
+                if let Some(p_val) = p.take() {
+                    let (service, _, _) = p_val;
+                    let new_p = (service, port.into(), device.into());
+                    services.push(new_p);
+                }
+            }
+        }
+    }
+
+    Ok(services)
+}
+
+#[allow(clippy::unwrap_used)]
+#[test]
+fn test_order() {
+    let services = listnetworkserviceorder().unwrap();
+    for (service, port, device) in services {
+        println!("service: {}, port: {}, device: {}", service, port, device);
+    }
+}
