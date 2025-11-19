@@ -4,10 +4,9 @@ use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::sync::Mutex;
 use sysproxy::{Autoproxy, Sysproxy};
-use tauri::{generate_context, generate_handler, Builder, RunEvent};
+use tauri::{generate_context, generate_handler, Builder, Emitter, RunEvent};
 
-#[derive(Clone)]
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct SavedProxy {
     sys_enable: bool,
     sys_host: String,
@@ -18,6 +17,7 @@ struct SavedProxy {
 }
 
 static SAVED_PROXY: Lazy<Mutex<Option<SavedProxy>>> = Lazy::new(|| Mutex::new(None));
+const PROXY_CHANGED_EVENT: &str = "proxy-changed";
 
 #[cfg(target_os = "windows")]
 const DEFAULT_BYPASS: &str = "localhost;127.*;192.168.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;<local>";
@@ -146,15 +146,195 @@ fn main() {
             get_saved_proxy,
             get_current_proxy
         ])
+        .setup(|app| {
+            start_proxy_change_listener(app.handle().clone());
+            Ok(())
+        })
         .build(generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|_, event| {
-        match event {
-            RunEvent::Exit { .. } | RunEvent::ExitRequested { .. } => {
-                let _ = restore_system_proxy();
+    app.run(|_, event| match event {
+        RunEvent::Exit { .. } | RunEvent::ExitRequested { .. } => {
+            let _ = restore_system_proxy();
+        }
+        _ => {}
+    });
+}
+
+fn emit_current_proxy_event(handle: &tauri::AppHandle) {
+    match get_current_proxy() {
+        Ok(proxy) => {
+            let _ = handle.emit(PROXY_CHANGED_EVENT, proxy);
+        }
+        Err(err) => {
+            eprintln!("failed to emit proxy change event: {err}");
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn start_proxy_change_listener(app_handle: tauri::AppHandle) {
+    use std::thread;
+    use windows::core::w;
+    use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_NOTIFY,
+        REG_NOTIFY_CHANGE_LAST_SET,
+    };
+
+    thread::spawn(move || unsafe {
+        let mut key = HKEY::default();
+        let status = RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"),
+            0,
+            KEY_NOTIFY,
+            &mut key,
+        );
+
+        if status != ERROR_SUCCESS {
+            eprintln!("failed to open registry for proxy changes: {status:?}");
+            return;
+        }
+
+        emit_current_proxy_event(&app_handle);
+
+        loop {
+            let wait_status = RegNotifyChangeKeyValue(
+                key,
+                false,
+                REG_NOTIFY_CHANGE_LAST_SET,
+                HANDLE::default(),
+                false,
+            );
+
+            if wait_status != ERROR_SUCCESS {
+                eprintln!("proxy change notifications stopped: {wait_status:?}");
+                break;
             }
-            _ => {}
+
+            emit_current_proxy_event(&app_handle);
+        }
+
+        let _ = RegCloseKey(key);
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn start_proxy_change_listener(app_handle: tauri::AppHandle) {
+    use core_foundation::{
+        array::CFArray,
+        runloop::{kCFRunLoopCommonModes, CFRunLoop},
+        string::CFString,
+    };
+    use std::thread;
+    use system_configuration::dynamic_store::{
+        SCDynamicStoreBuilder, SCDynamicStoreCallBackContext,
+    };
+
+    thread::spawn(move || {
+        let callback_context = SCDynamicStoreCallBackContext {
+            callout: macos_proxy_callback,
+            info: app_handle.clone(),
+        };
+
+        let store = SCDynamicStoreBuilder::new("sysproxy-tauri-proxy-listener")
+            .callback_context(callback_context)
+            .build();
+
+        let observed_keys = CFArray::<CFString>::from_CFTypes(&[]);
+        let observed_patterns = CFArray::from_CFTypes(&[
+            CFString::from_static_string("State:/Network/Global/Proxies"),
+            CFString::from_static_string("Setup:/Network/Global/Proxies"),
+            CFString::from_static_string("State:/Network/Service/.*/Proxies"),
+            CFString::from_static_string("Setup:/Network/Service/.*/Proxies"),
+        ]);
+
+        if !store.set_notification_keys(&observed_keys, &observed_patterns) {
+            eprintln!("failed to register proxy change notifications on macOS");
+            emit_current_proxy_event(&app_handle);
+            return;
+        }
+
+        emit_current_proxy_event(&app_handle);
+
+        let run_loop_source = store.create_run_loop_source();
+        let run_loop = CFRunLoop::get_current();
+        unsafe {
+            run_loop.add_source(&run_loop_source, kCFRunLoopCommonModes);
+        }
+        CFRunLoop::run_current();
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn macos_proxy_callback(
+    _store: system_configuration::dynamic_store::SCDynamicStore,
+    _changed: core_foundation::array::CFArray<core_foundation::string::CFString>,
+    handle: &mut tauri::AppHandle,
+) {
+    emit_current_proxy_event(handle);
+}
+
+#[cfg(target_os = "linux")]
+fn start_proxy_change_listener(app_handle: tauri::AppHandle) {
+    use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::path::PathBuf;
+    use std::thread;
+
+    let config_file = match proxy_config_file_path() {
+        Some(path) => path,
+        None => {
+            eprintln!("proxy watch path not found, cannot listen for changes");
+            return;
+        }
+    };
+
+    let watch_dir = config_file
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config_file.clone());
+
+    thread::spawn(move || {
+        let callback_handle = app_handle.clone();
+        let emit_handle = app_handle.clone();
+
+        let mut watcher = match RecommendedWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| match res {
+                Ok(_) => {
+                    emit_current_proxy_event(&callback_handle);
+                }
+                Err(err) => {
+                    eprintln!("proxy watcher error: {err}");
+                }
+            },
+            Config::default(),
+        ) {
+            Ok(watcher) => watcher,
+            Err(err) => {
+                eprintln!("failed to create proxy watcher: {err}");
+                return;
+            }
+        };
+
+        if let Err(err) = watcher.watch(watch_dir.as_path(), RecursiveMode::NonRecursive) {
+            eprintln!("failed to watch proxy directory: {err}");
+            return;
+        }
+
+        emit_current_proxy_event(&emit_handle);
+
+        loop {
+            thread::park();
         }
     });
 }
+
+#[cfg(target_os = "linux")]
+fn proxy_config_file_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(std::path::PathBuf::from(home).join(".config/dconf/user"))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn start_proxy_change_listener(_app_handle: tauri::AppHandle) {}

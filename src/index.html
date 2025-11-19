@@ -122,6 +122,82 @@
         st.textContent = msg;
       };
 
+      let tauriBridge = null;
+      let bridgeInitPromise = null;
+
+      const loadInvokeFn = async () => {
+        if (window.__TAURI__?.core?.invoke) {
+          return window.__TAURI__.core.invoke;
+        }
+        const candidates = [
+          "tauri://localhost/.tauri/api.js",
+          "/.tauri/api.js",
+        ];
+        for (const url of candidates) {
+          try {
+            const api = await import(url);
+            if (api?.invoke) return api.invoke;
+            if (api?.core?.invoke) return api.core.invoke;
+          } catch (e) {
+            console.warn("load tauri core failed", url, e);
+          }
+        }
+        return null;
+      };
+
+      const loadListenFn = async () => {
+        if (window.__TAURI__?.event?.listen) {
+          return window.__TAURI__.event.listen;
+        }
+        const candidates = [
+          "tauri://localhost/@tauri-apps/api/event",
+          "tauri://localhost/.tauri/api.js",
+          "/.tauri/api.js",
+        ];
+        for (const url of candidates) {
+          try {
+            const mod = await import(url);
+            if (typeof mod?.listen === "function") {
+              return mod.listen;
+            }
+            if (typeof mod?.event?.listen === "function") {
+              return mod.event.listen;
+            }
+          } catch (e) {
+            console.warn("load tauri event failed", url, e);
+          }
+        }
+        return window.__TAURI__?.event?.listen ?? null;
+      };
+
+      const ensureTauriBridge = async () => {
+        if (tauriBridge) return tauriBridge;
+        if (bridgeInitPromise) return bridgeInitPromise;
+
+        bridgeInitPromise = (async () => {
+          const invoke = await loadInvokeFn();
+          if (!invoke) {
+            renderStatus("未检测到 Tauri 注入，请用 `pnpm dev` 启动", true);
+            return null;
+          }
+
+          const listen = await loadListenFn();
+          tauriBridge = { invoke, listen };
+          return tauriBridge;
+        })();
+
+        const bridge = await bridgeInitPromise;
+        if (!bridge) {
+          bridgeInitPromise = null;
+        }
+        return bridge;
+      };
+
+      const getInvoke = async () => {
+        const bridge = await ensureTauriBridge();
+        return bridge?.invoke ?? null;
+      };
+
       const refreshSaved = async () => {
         const invoke = await getInvoke();
         if (!invoke) return;
@@ -133,22 +209,21 @@
         }
       };
 
-      const getInvoke = async () => {
-        if (window.__TAURI__?.core?.invoke) return window.__TAURI__.core.invoke;
-        const candidates = [
-          "tauri://localhost/.tauri/api.js",
-          "/.tauri/api.js",
-        ];
-        for (const url of candidates) {
-          try {
-            const api = await import(url);
-            if (api?.invoke) return api.invoke;
-          } catch (e) {
-            console.warn("load tauri api failed", url, e);
-          }
+      const setupProxyChangeListener = async () => {
+        const bridge = await ensureTauriBridge();
+        if (!bridge?.listen) {
+          console.warn("proxy listener missing tauri event API");
+          return;
         }
-        renderStatus("未检测到 Tauri 注入，请用 `pnpm dev` 启动", true);
-        return null;
+        try {
+          await bridge.listen("proxy-changed", (event) => {
+            if (event?.payload) {
+              renderCurrent(event.payload, "监听到系统代理变化");
+            }
+          });
+        } catch (e) {
+          console.warn("failed to listen proxy changes", e);
+        }
       };
 
       document.getElementById("apply").addEventListener("click", async () => {
@@ -198,6 +273,7 @@
         }
       });
 
+      setupProxyChangeListener();
       refreshSaved();
     </script>
   </body>

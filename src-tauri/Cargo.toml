@@ -9,6 +9,17 @@ sysproxy = { path = "./sysproxy" }
 tauri = { version = "2.9.2", features = ["wry"] }
 once_cell = "1.19.0"
 serde = { version = "1.0.188", features = ["derive"] }
+notify = "6.1"
 
 [build-dependencies]
 tauri-build = { version = "2.5.1", features = [] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.6"
+core-foundation = "0.9"
