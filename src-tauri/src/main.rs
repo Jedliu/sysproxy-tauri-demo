@@ -113,8 +113,8 @@ fn restore_system_proxy() -> Result<(), String> {
             .map_err(|e| format!("还原系统代理失败: {e}"))?;
         Ok(())
     } else {
-        // 没有记录则退回到关闭代理
-        reset_system_proxy()
+        // 没有记录则说明未改动系统代理，直接跳过
+        Ok(())
     }
 }
 
