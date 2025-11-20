@@ -101,20 +101,37 @@
     <div id="status"></div>
 
     <script type="module">
+      // --- DOM 元素获取 ---
       const hostInput = document.getElementById("host");
       const portInput = document.getElementById("port");
       const status = document.getElementById("status");
 
+      // --- UI 更新函数 ---
+
+      /**
+       * 渲染底部状态消息
+       * @param {string} text - 要显示的消息文本
+       * @param {boolean} [isError=false] - 是否为错误消息（用于设置颜色）
+       */
       const renderStatus = (text, isError = false) => {
         status.textContent = text;
         status.style.color = isError ? "#dc2626" : "#16a34a";
       };
 
+      /**
+       * 将数据显示在“原代理配置”文本域中
+       * @param {object | null} data - 从后端获取的代理配置对象
+       */
       const renderSaved = (data) => {
         const saved = document.getElementById("saved");
         saved.value = data ? JSON.stringify(data, null, 2) : "";
       };
 
+      /**
+       * 将数据显示在“当前系统代理”文本域中
+       * @param {object | null} data - 从后端获取的代理配置对象
+       * @param {string} [msg=""] - 显示在旁边的状态文本，如“加载中...”
+       */
       const renderCurrent = (data, msg = "") => {
         const el = document.getElementById("current-text");
         el.value = data ? JSON.stringify(data, null, 2) : "";
@@ -122,9 +139,19 @@
         st.textContent = msg;
       };
 
+      // --- Tauri 后端通信 ---
+
+      // 全局变量，用于缓存 Tauri API 函数，避免重复加载
       let tauriBridge = null;
+      // 用于防止重复初始化
       let bridgeInitPromise = null;
 
+      /**
+       * 动态加载并返回 Tauri 的 `invoke` 函数。
+       * 这是与后端 Rust 命令通信的核心函数。
+       * 函数会尝试多种方式加载 API，以兼容不同环境。
+       * @returns {Promise<Function|null>}
+       */
       const loadInvokeFn = async () => {
         if (window.__TAURI__?.core?.invoke) {
           return window.__TAURI__.core.invoke;
@@ -145,6 +172,11 @@
         return null;
       };
 
+      /**
+       * 动态加载并返回 Tauri 的 `listen` 函数。
+       * 这是监听后端 Rust 事件的核心函数。
+       * @returns {Promise<Function|null>}
+       */
       const loadListenFn = async () => {
         if (window.__TAURI__?.event?.listen) {
           return window.__TAURI__.event.listen;
@@ -170,6 +202,11 @@
         return window.__TAURI__?.event?.listen ?? null;
       };
 
+      /**
+       * 确保 Tauri 的 invoke 和 listen 函数已加载并可用。
+       * 使用单例模式确保初始化逻辑只执行一次。
+       * @returns {Promise<{invoke: Function, listen: Function}|null>}
+       */
       const ensureTauriBridge = async () => {
         if (tauriBridge) return tauriBridge;
         if (bridgeInitPromise) return bridgeInitPromise;
@@ -193,11 +230,20 @@
         return bridge;
       };
 
+      /**
+       * 获取 `invoke` 函数的便捷方法。
+       * @returns {Promise<Function|null>}
+       */
       const getInvoke = async () => {
         const bridge = await ensureTauriBridge();
         return bridge?.invoke ?? null;
       };
 
+      // --- 业务逻辑函数 ---
+
+      /**
+       * 调用后端命令 `get_saved_proxy` 并更新 UI。
+       */
       const refreshSaved = async () => {
         const invoke = await getInvoke();
         if (!invoke) return;
@@ -209,6 +255,9 @@
         }
       };
 
+      /**
+       * 设置监听器以接收来自后端的代理变化事件。
+       */
       const setupProxyChangeListener = async () => {
         console.log("设置代理变化监听器...");
         const bridge = await ensureTauriBridge();
@@ -217,6 +266,7 @@
           return;
         }
         try {
+          // 监听 "proxy-changed" 事件
           await bridge.listen("proxy-changed", (event) => {
             console.log("收到 proxy-changed 事件:", event);
             if (event?.payload) {
@@ -225,7 +275,7 @@
           });
           console.log("代理变化监听器设置成功");
 
-          // 监听器设置成功后，立即获取一次当前代理信息
+          // 监听器设置成功后，立即获取一次当前代理信息以作初始化显示
           const invoke = await getInvoke();
           if (invoke) {
             try {
@@ -241,6 +291,9 @@
         }
       };
 
+      // --- 事件监听器绑定 ---
+
+      // “应用代理”按钮点击事件
       document.getElementById("apply").addEventListener("click", async () => {
         const invoke = await getInvoke();
         if (!invoke) return;
@@ -254,13 +307,14 @@
         try {
           await invoke("set_system_proxy", { host, port });
           renderStatus(`已设置系统代理为 ${host}:${port}`);
-          refreshSaved();
+          refreshSaved(); // 设置成功后，刷新一下“原代理”的显示
         } catch (e) {
           console.error(e);
           renderStatus(`设置失败：${e}`, true);
         }
       });
 
+      // “恢复原代理”按钮点击事件
       document.getElementById("restore").addEventListener("click", async () => {
         const invoke = await getInvoke();
         if (!invoke) return;
@@ -268,13 +322,14 @@
         try {
           await invoke("restore_system_proxy");
           renderStatus("已恢复原代理（若无记录则已关闭）");
-          refreshSaved();
+          refreshSaved(); // 恢复后，“原代理”记录理论上被清空了
         } catch (e) {
           console.error(e);
           renderStatus(`恢复失败：${e}`, true);
         }
       });
 
+      // “获取当前代理”按钮点击事件
       document.getElementById("current").addEventListener("click", async () => {
         const invoke = await getInvoke();
         if (!invoke) return;
@@ -288,7 +343,10 @@
         }
       });
 
+      // --- 初始化 ---
+      // 页面加载后立即启动代理变化监听
       setupProxyChangeListener();
+      // 并获取一次已保存的代理信息
       refreshSaved();
     </script>
   </body>
