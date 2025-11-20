@@ -210,6 +210,7 @@
       };
 
       const setupProxyChangeListener = async () => {
+        console.log("设置代理变化监听器...");
         const bridge = await ensureTauriBridge();
         if (!bridge?.listen) {
           console.warn("proxy listener missing tauri event API");
@@ -217,10 +218,24 @@
         }
         try {
           await bridge.listen("proxy-changed", (event) => {
+            console.log("收到 proxy-changed 事件:", event);
             if (event?.payload) {
               renderCurrent(event.payload, "监听到系统代理变化");
             }
           });
+          console.log("代理变化监听器设置成功");
+
+          // 监听器设置成功后，立即获取一次当前代理信息
+          const invoke = await getInvoke();
+          if (invoke) {
+            try {
+              const data = await invoke("get_current_proxy");
+              renderCurrent(data, "初始加载");
+              console.log("初始代理信息已加载:", data);
+            } catch (e) {
+              console.warn("获取初始代理信息失败", e);
+            }
+          }
         } catch (e) {
           console.warn("failed to listen proxy changes", e);
         }

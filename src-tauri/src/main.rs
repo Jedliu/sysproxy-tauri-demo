@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use sysproxy::{Autoproxy, Sysproxy};
 use tauri::{generate_context, generate_handler, Builder, Emitter, RunEvent};
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Debug, PartialEq)]
 struct SavedProxy {
     sys_enable: bool,
     sys_host: String,
@@ -17,6 +17,7 @@ struct SavedProxy {
 }
 
 static SAVED_PROXY: Lazy<Mutex<Option<SavedProxy>>> = Lazy::new(|| Mutex::new(None));
+static LAST_EMITTED_PROXY: Lazy<Mutex<Option<SavedProxy>>> = Lazy::new(|| Mutex::new(None));
 const PROXY_CHANGED_EVENT: &str = "proxy-changed";
 
 #[cfg(target_os = "windows")]
@@ -164,10 +165,28 @@ fn main() {
 fn emit_current_proxy_event(handle: &tauri::AppHandle) {
     match get_current_proxy() {
         Ok(proxy) => {
-            let _ = handle.emit(PROXY_CHANGED_EVENT, proxy);
+            // 去重：如果与上次发送的代理配置相同，则跳过
+            let should_emit = {
+                let mut last = LAST_EMITTED_PROXY.lock().unwrap();
+                let is_different = last.as_ref() != Some(&proxy);
+                if is_different {
+                    *last = Some(proxy.clone());
+                }
+                is_different
+            };
+
+            if should_emit {
+                eprintln!("emitting proxy change event: {:?}", proxy);
+                match handle.emit(PROXY_CHANGED_EVENT, proxy) {
+                    Ok(_) => eprintln!("proxy change event emitted successfully"),
+                    Err(e) => eprintln!("failed to emit proxy change event: {e}"),
+                }
+            } else {
+                eprintln!("skipping duplicate proxy event");
+            }
         }
         Err(err) => {
-            eprintln!("failed to emit proxy change event: {err}");
+            eprintln!("failed to get current proxy: {err}");
         }
     }
 }
@@ -244,10 +263,8 @@ fn start_proxy_change_listener(app_handle: tauri::AppHandle) {
 
         let observed_keys = CFArray::<CFString>::from_CFTypes(&[]);
         let observed_patterns = CFArray::from_CFTypes(&[
-            CFString::from_static_string("State:/Network/Global/Proxies"),
-            CFString::from_static_string("Setup:/Network/Global/Proxies"),
-            CFString::from_static_string("State:/Network/Service/.*/Proxies"),
-            CFString::from_static_string("Setup:/Network/Service/.*/Proxies"),
+            CFString::from("(State|Setup):/Network/Global/Proxies"),
+            CFString::from("(State|Setup):/Network/Service/.*/Proxies"),
         ]);
 
         if !store.set_notification_keys(&observed_keys, &observed_patterns) {
@@ -256,6 +273,7 @@ fn start_proxy_change_listener(app_handle: tauri::AppHandle) {
             return;
         }
 
+        // 发送初始代理信息（去重逻辑会避免重复发送）
         emit_current_proxy_event(&app_handle);
 
         let run_loop_source = store.create_run_loop_source();

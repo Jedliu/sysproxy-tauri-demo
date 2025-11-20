@@ -15,11 +15,28 @@
   },
   "app": {
     "withGlobalTauri": true,
+    "security": {
+      "capabilities": [
+        {
+          "identifier": "main-capability",
+          "description": "Main window capabilities",
+          "windows": [
+            "main"
+          ],
+          "permissions": [
+            "core:default",
+            "core:event:allow-listen",
+            "core:event:allow-emit"
+          ]
+        }
+      ]
+    },
     "windows": [
       {
+        "label": "main",
         "title": "Sysproxy Demo",
         "width": 800,
-        "height": 800,
+        "height": 1000,
         "resizable": true
       }
     ]
