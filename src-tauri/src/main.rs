@@ -195,7 +195,7 @@ fn emit_current_proxy_event(handle: &tauri::AppHandle) {
 fn start_proxy_change_listener(app_handle: tauri::AppHandle) {
     use std::thread;
     use windows::core::w;
-    use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+    use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
         RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_NOTIFY,
         REG_NOTIFY_CHANGE_LAST_SET,
@@ -206,7 +206,7 @@ fn start_proxy_change_listener(app_handle: tauri::AppHandle) {
         let status = RegOpenKeyExW(
             HKEY_CURRENT_USER,
             w!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"),
-            0,
+            Some(0),
             KEY_NOTIFY,
             &mut key,
         );
@@ -223,7 +223,7 @@ fn start_proxy_change_listener(app_handle: tauri::AppHandle) {
                 key,
                 false,
                 REG_NOTIFY_CHANGE_LAST_SET,
-                HANDLE::default(),
+                None,
                 false,
             );
 
