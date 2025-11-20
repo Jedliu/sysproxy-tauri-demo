@@ -1,3 +1,20 @@
+// ============================================================================
+// 证书安装器模块 (Certificate Installer Module)
+// ============================================================================
+// 这个模块负责将 CA 证书安装到系统信任存储中。
+// 对于 HTTPS MITM 代理，必须让系统信任我们的 CA 证书，
+// 否则浏览器会显示 "您的连接不是私密连接" 错误。
+//
+// 跨平台支持：
+// - Windows: 使用 Windows API 安装到 ROOT 证书存储
+// - macOS: 使用 security 命令安装到系统钥匙串
+// - Linux: 支持 Ubuntu/Debian、RedHat/CentOS、Arch Linux
+//
+// macOS 特殊处理：
+// 使用 osascript 执行 security 命令，会触发系统原生的授权对话框，
+// 提供更好的用户体验（相比手动在终端输入 sudo 密码）。
+// ============================================================================
+
 use std::path::Path;
 use std::process::Command;
 
@@ -10,10 +27,16 @@ use windows::Win32::Security::Cryptography::{
 #[cfg(target_os = "windows")]
 use windows::core::PCWSTR;
 
+/// 证书安装器
+///
+/// 提供跨平台的证书安装、卸载和检查功能。
+/// 所有方法都是静态的，不需要创建实例。
 pub struct CertInstaller;
 
 impl CertInstaller {
-    /// Uninstall/remove a certificate from the system trust store
+    /// 从系统信任存储中卸载/删除证书
+    ///
+    /// 根据不同的操作系统调用对应的实现。
     pub fn uninstall_cert() -> Result<String, Box<dyn std::error::Error>> {
         #[cfg(target_os = "windows")]
         return Self::uninstall_cert_windows();
@@ -28,7 +51,9 @@ impl CertInstaller {
         Err("Unsupported platform".into())
     }
 
-    /// Install a certificate to the system trust store
+    /// 将证书安装到系统信任存储
+    ///
+    /// 根据不同的操作系统调用对应的实现。
     pub fn install_cert(cert_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
         #[cfg(target_os = "windows")]
         return Self::install_cert_windows(cert_path);
@@ -43,7 +68,7 @@ impl CertInstaller {
         Err("Unsupported platform".into())
     }
 
-    /// Check if a certificate is installed
+    /// 检查证书是否已安装
     pub fn is_cert_installed(cert_path: &Path) -> bool {
         #[cfg(target_os = "windows")]
         return Self::is_cert_installed_windows(cert_path);
@@ -97,49 +122,70 @@ impl CertInstaller {
         true
     }
 
+    /// macOS: 安装证书到系统钥匙串
+    ///
+    /// 这个方法使用 AppleScript + osascript 的方式来安装证书，
+    /// 会触发 macOS 原生的授权对话框，提供更好的用户体验。
+    ///
+    /// 工作原理：
+    /// 1. 构造一个 AppleScript 脚本
+    /// 2. 脚本内容是执行 security add-trusted-cert 命令
+    /// 3. 使用 "with administrator privileges" 触发授权对话框
+    /// 4. 用户输入管理员密码后，证书会被安装并设置为受信任
+    ///
+    /// 优势：
+    /// - 用户体验好：使用系统原生对话框
+    /// - 安全：通过系统授权机制，不需要应用自己处理密码
+    /// - 一步到位：安装 + 设置信任一次完成
+    ///
+    /// 对比：之前的方法需要用户手动在终端运行 sudo 命令，
+    /// 或者手动打开钥匙串访问应用进行多步操作。
     #[cfg(target_os = "macos")]
     fn install_cert_macos(cert_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-        // First try installing to the user's login keychain (no admin required)
-        let home = std::env::var("HOME").map_err(|_| "无法获取用户主目录")?;
-        let login_keychain = format!("{}/Library/Keychains/login.keychain-db", home);
+        let cert_path_str = cert_path.to_str().ok_or("Invalid cert path")?;
 
-        let output = Command::new("security")
-            .args([
-                "add-trusted-cert",
-                "-d",           // Add to admin cert store
-                "-r", "trustRoot",  // Set trust settings for SSL
-                "-k", &login_keychain,
-                cert_path.to_str().ok_or("Invalid cert path")?,
-            ])
+        // 构造 AppleScript 脚本
+        // do shell script "命令" with administrator privileges
+        // 这会触发 macOS 原生的授权对话框
+        let script = format!(
+            "do shell script \"security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain '{}'\" with administrator privileges",
+            cert_path_str.replace("'", "'\\''") // 转义单引号，防止 AppleScript 语法错误
+        );
+
+        // 使用 osascript 执行 AppleScript
+        let output = Command::new("osascript")
+            .args(["-e", &script])
             .output()?;
 
         if output.status.success() {
             Ok(format!(
-                "证书已成功安装到用户钥匙串\n\n如果浏览器仍然提示不受信任，请：\n\
-                1. 打开「钥匙串访问」应用\n\
-                2. 找到「Sysproxy MITM CA」证书\n\
-                3. 双击打开，展开「信任」选项\n\
-                4. 将「使用此证书时」设置为「始终信任」\n\n\
+                "证书已成功安装到系统钥匙串并设置为受信任！\n\n\
+                现在您可以直接通过代理访问 HTTPS 网站了。\n\
+                如果浏览器已经打开，请重启浏览器以使证书生效。\n\n\
                 证书路径: {}",
                 cert_path.display()
             ))
         } else {
             let error = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
 
+            // 检查用户是否取消了授权对话框
+            if error.contains("User canceled") || error.contains("cancelled") {
+                return Err("用户取消了授权。安装证书需要管理员权限。".into());
+            }
+
+            // 构造错误消息，提供手动安装的方法
             let mut msg = String::new();
             if !error.is_empty() {
                 msg.push_str(&format!("错误: {}\n\n", error.trim()));
             }
-            if !stdout.is_empty() {
-                msg.push_str(&format!("输出: {}\n\n", stdout.trim()));
-            }
             msg.push_str(&format!("证书路径: {}\n\n", cert_path.display()));
             msg.push_str("您可以手动安装证书：\n");
-            msg.push_str("1. 打开「钥匙串访问」应用\n");
-            msg.push_str("2. 选择「登录」钥匙串\n");
-            msg.push_str("3. 拖放证书文件到窗口中\n");
-            msg.push_str("4. 双击证书，设置「信任」为「始终信任」");
+            msg.push_str("1. 在终端运行以下命令：\n");
+            msg.push_str(&format!("   sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain '{}'\n\n", cert_path_str));
+            msg.push_str("或者：\n");
+            msg.push_str("2. 打开「钥匙串访问」应用\n");
+            msg.push_str("3. 将证书文件拖放到「系统」钥匙串中\n");
+            msg.push_str("4. 双击证书，在「信任」部分设置为「始终信任」");
 
             Err(msg.into())
         }
@@ -186,58 +232,53 @@ impl CertInstaller {
         false
     }
 
+    /// macOS: 从系统钥匙串中删除证书
+    ///
+    /// 与安装类似，使用 AppleScript + osascript 触发原生授权对话框。
+    ///
+    /// 工作原理：
+    /// 1. 执行 security delete-certificate 命令
+    /// 2. 使用 "with administrator privileges" 触发授权
+    /// 3. 删除名为 "Sysproxy MITM CA" 的证书
+    ///
+    /// 错误处理：
+    /// - 用户取消授权：返回友好的错误消息
+    /// - 证书未找到：视为成功（已经删除）
+    /// - 其他错误：提供手动删除的方法
     #[cfg(target_os = "macos")]
     fn uninstall_cert_macos() -> Result<String, Box<dyn std::error::Error>> {
-        let mut removed_count = 0;
-        let mut errors = Vec::new();
+        // 构造 AppleScript 脚本删除证书
+        // -c 指定证书名称
+        let script = "do shell script \"security delete-certificate -c 'Sysproxy MITM CA' /Library/Keychains/System.keychain\" with administrator privileges";
 
-        // Try to remove from login keychain
-        if let Ok(home) = std::env::var("HOME") {
-            let login_keychain = format!("{}/Library/Keychains/login.keychain-db", home);
-
-            // Delete certificate from login keychain
-            let output = Command::new("security")
-                .args([
-                    "delete-certificate",
-                    "-c", "Sysproxy MITM CA",
-                    &login_keychain,
-                ])
-                .output()?;
-
-            if output.status.success() {
-                removed_count += 1;
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !stderr.contains("not found") && !stderr.is_empty() {
-                    errors.push(format!("登录钥匙串: {}", stderr.trim()));
-                }
-            }
-        }
-
-        // Try to remove from system keychain
-        let output = Command::new("security")
-            .args([
-                "delete-certificate",
-                "-c", "Sysproxy MITM CA",
-                "/Library/Keychains/System.keychain",
-            ])
+        // 使用 osascript 执行
+        let output = Command::new("osascript")
+            .args(["-e", script])
             .output()?;
 
         if output.status.success() {
-            removed_count += 1;
+            Ok("证书已成功从系统钥匙串中删除".to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.contains("not found") && !stderr.is_empty() {
-                errors.push(format!("系统钥匙串: {}", stderr.trim()));
-            }
-        }
+            let error = String::from_utf8_lossy(&output.stderr);
 
-        if removed_count > 0 {
-            Ok(format!("已成功删除 {} 个证书", removed_count))
-        } else if !errors.is_empty() {
-            Err(format!("删除证书时遇到错误:\n{}", errors.join("\n")).into())
-        } else {
-            Err("未找到需要删除的证书".into())
+            // 检查用户是否取消了授权对话框
+            if error.contains("User canceled") || error.contains("cancelled") {
+                return Err("用户取消了授权。删除证书需要管理员权限。".into());
+            }
+
+            // 如果证书未找到，视为成功（已经删除）
+            if error.contains("not found") || error.contains("could not be found") {
+                return Ok("证书未安装或已被删除".to_string());
+            }
+
+            // 其他错误，提供手动删除方法
+            let mut msg = format!("删除证书失败\n\n错误: {}\n\n", error.trim());
+            msg.push_str("您可以手动删除证书：\n");
+            msg.push_str("1. 打开「钥匙串访问」应用\n");
+            msg.push_str("2. 在「系统」钥匙串中找到「Sysproxy MITM CA」证书\n");
+            msg.push_str("3. 右键点击并选择「删除」");
+
+            Err(msg.into())
         }
     }
 

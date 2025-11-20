@@ -215,7 +215,13 @@ async fn start_proxy_server(port: u16, enable_https_intercept: bool) -> Result<S
         log_requests: true,
     };
 
-    let server = Arc::new(ProxyServer::new(config).map_err(|e| format!("创建代理服务器失败: {}", e))?);
+    // Get interceptor from global state
+    let interceptor = {
+        let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+        Arc::clone(&state.interceptor)
+    };
+
+    let server = Arc::new(ProxyServer::new(config, interceptor).map_err(|e| format!("创建代理服务器失败: {}", e))?);
 
     // Create log channel
     let (log_sender, log_receiver) = mpsc::unbounded_channel();

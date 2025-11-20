@@ -553,6 +553,128 @@
       </div>
     </div>
 
+    <!-- 规则编辑对话框 -->
+    <div class="modal-overlay" id="rule-modal">
+      <div class="modal-content" style="max-width: 600px;">
+        <div class="modal-header" id="rule-modal-title">添加拦截规则</div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="rule-name">规则名称</label>
+            <input type="text" id="rule-name" placeholder="例如：保存百度请求" />
+          </div>
+
+          <div class="form-group">
+            <label for="rule-type">规则类型</label>
+            <select id="rule-type">
+              <option value="Request">请求</option>
+              <option value="Response">响应</option>
+              <option value="Both">请求和响应</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="rule-url-pattern">URL 匹配模式（正则表达式，可选）</label>
+            <input type="text" id="rule-url-pattern" placeholder="例如：.*baidu.com.*" />
+          </div>
+
+          <div class="form-group">
+            <label for="rule-method">HTTP 方法（可选）</label>
+            <select id="rule-method">
+              <option value="">任意</option>
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+              <option value="PUT">PUT</option>
+              <option value="DELETE">DELETE</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="rule-action-type">操作类型</label>
+            <select id="rule-action-type">
+              <option value="SaveData">保存数据</option>
+              <option value="ModifyHeaders">修改头部</option>
+              <option value="MockResponse">返回Mock响应</option>
+              <option value="Block">阻止请求</option>
+            </select>
+          </div>
+
+          <!-- SaveData 操作参数 -->
+          <div id="action-savedata" class="action-params">
+            <div class="form-group">
+              <label>保存选项</label>
+              <label style="display: flex; align-items: center; gap: 10px; font-weight: normal;">
+                <input type="checkbox" id="save-request" checked />
+                保存请求
+              </label>
+              <label style="display: flex; align-items: center; gap: 10px; font-weight: normal;">
+                <input type="checkbox" id="save-response" checked />
+                保存响应
+              </label>
+            </div>
+            <div class="form-group">
+              <label for="save-file-path">保存文件路径</label>
+              <input type="text" id="save-file-path" placeholder="/tmp/proxy-data.txt" />
+            </div>
+          </div>
+
+          <!-- ModifyHeaders 操作参数 -->
+          <div id="action-modifyheaders" class="action-params" style="display: none;">
+            <div class="form-group">
+              <label for="headers-add">添加头部（JSON 格式）</label>
+              <textarea id="headers-add" rows="3" placeholder='[["X-Custom", "value"]]'></textarea>
+            </div>
+            <div class="form-group">
+              <label for="headers-remove">删除头部（JSON 数组）</label>
+              <textarea id="headers-remove" rows="2" placeholder='["User-Agent"]'></textarea>
+            </div>
+          </div>
+
+          <!-- MockResponse 操作参数 -->
+          <div id="action-mockresponse" class="action-params" style="display: none;">
+            <div class="form-group">
+              <label for="mock-status">HTTP 状态码</label>
+              <input type="number" id="mock-status" value="200" />
+            </div>
+            <div class="form-group">
+              <label for="mock-body">响应内容</label>
+              <textarea id="mock-body" rows="4" placeholder='{"message": "Mocked response"}'></textarea>
+            </div>
+          </div>
+
+          <!-- Block 操作参数 -->
+          <div id="action-block" class="action-params" style="display: none;">
+            <div class="form-group">
+              <label for="block-status">HTTP 状态码</label>
+              <input type="number" id="block-status" value="403" />
+            </div>
+            <div class="form-group">
+              <label for="block-message">阻止消息</label>
+              <input type="text" id="block-message" value="Request blocked by proxy" />
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="rule-modal-cancel">取消</button>
+          <button class="btn btn-primary" id="rule-modal-save">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 确认删除规则对话框 -->
+    <div class="modal-overlay" id="delete-rule-modal">
+      <div class="modal-content">
+        <div class="modal-header">⚠️ 确认删除规则</div>
+        <div class="modal-body">
+          您确定要删除此拦截规则吗？<br /><br />
+          此操作无法撤销。
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="delete-rule-cancel">取消</button>
+          <button class="btn btn-danger" id="delete-rule-confirm">确定删除</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module">
       // Tauri API
       let invoke = null
@@ -811,10 +933,291 @@
           }
         })
 
-      // Rules management (simplified)
+      // Rules management
+      let currentEditingRuleId = null
+      let ruleIdToDelete = null
+      const rulesContainer = document.getElementById('rules-container')
+
+      // Load and display rules
+      async function loadRules() {
+        try {
+          const rules = await invoke('get_intercept_rules')
+          displayRules(rules)
+        } catch (e) {
+          showMessage('rules-status', String(e), 'error')
+        }
+      }
+
+      // Display rules in the container
+      function displayRules(rules) {
+        if (rules.length === 0) {
+          rulesContainer.innerHTML =
+            '<p style="color: #6b7280">暂无规则。点击上方按钮添加规则。</p>'
+          return
+        }
+
+        rulesContainer.innerHTML = rules
+          .map(
+            (rule) => `
+          <div class="rule-item">
+            <div class="rule-header">
+              <div>
+                <span class="rule-name">${rule.name}</span>
+                <span style="color: #6b7280; font-size: 12px; margin-left: 8px;">${rule.rule_type}</span>
+              </div>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <label class="switch">
+                  <input type="checkbox" ${rule.enabled ? 'checked' : ''} onchange="toggleRule('${rule.id}', this.checked)">
+                  <span class="slider"></span>
+                </label>
+                <button class="btn btn-sm btn-secondary" onclick="editRule('${rule.id}')">编辑</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteRule('${rule.id}')">删除</button>
+              </div>
+            </div>
+            <div class="rule-details">
+              ${rule.match_pattern.url_pattern ? `URL: ${rule.match_pattern.url_pattern}` : ''}
+              ${rule.match_pattern.method ? ` | 方法: ${rule.match_pattern.method}` : ''}
+            </div>
+          </div>
+        `
+          )
+          .join('')
+      }
+
+      // Show rule modal for adding new rule
       document.getElementById('add-rule-btn').addEventListener('click', () => {
-        showMessage('rules-status', '规则管理功能开发中...', 'info')
+        currentEditingRuleId = null
+        document.getElementById('rule-modal-title').textContent = '添加拦截规则'
+        clearRuleForm()
+        showRuleModal()
       })
+
+      // Show/hide rule modal
+      function showRuleModal() {
+        document.getElementById('rule-modal').classList.add('active')
+      }
+
+      function hideRuleModal() {
+        document.getElementById('rule-modal').classList.remove('active')
+      }
+
+      // Clear rule form
+      function clearRuleForm() {
+        document.getElementById('rule-name').value = ''
+        document.getElementById('rule-type').value = 'Request'
+        document.getElementById('rule-url-pattern').value = ''
+        document.getElementById('rule-method').value = ''
+        document.getElementById('rule-action-type').value = 'SaveData'
+        document.getElementById('save-request').checked = true
+        document.getElementById('save-response').checked = true
+        document.getElementById('save-file-path').value = '/tmp/proxy-data.txt'
+        updateActionParams()
+      }
+
+      // Update action params visibility based on action type
+      function updateActionParams() {
+        const actionType = document.getElementById('rule-action-type').value
+        document.querySelectorAll('.action-params').forEach((el) => {
+          el.style.display = 'none'
+        })
+        const selectedParam = document.getElementById(`action-${actionType.toLowerCase()}`)
+        if (selectedParam) {
+          selectedParam.style.display = 'block'
+        }
+      }
+
+      document
+        .getElementById('rule-action-type')
+        .addEventListener('change', updateActionParams)
+
+      // Save rule
+      document.getElementById('rule-modal-save').addEventListener('click', async () => {
+        try {
+          const rule = buildRuleFromForm()
+
+          if (currentEditingRuleId) {
+            await invoke('update_intercept_rule', { rule })
+            showMessage('rules-status', '规则已更新', 'success')
+          } else {
+            await invoke('add_intercept_rule', { rule })
+            showMessage('rules-status', '规则已添加', 'success')
+          }
+
+          hideRuleModal()
+          loadRules()
+        } catch (e) {
+          showMessage('rules-status', String(e), 'error')
+        }
+      })
+
+      // Build rule object from form
+      function buildRuleFromForm() {
+        const actionType = document.getElementById('rule-action-type').value
+        let action
+
+        switch (actionType) {
+          case 'SaveData':
+            action = {
+              SaveData: {
+                save_request: document.getElementById('save-request').checked,
+                save_response: document.getElementById('save-response').checked,
+                file_path: document.getElementById('save-file-path').value,
+              },
+            }
+            break
+          case 'ModifyHeaders':
+            action = {
+              ModifyHeaders: {
+                add: JSON.parse(document.getElementById('headers-add').value || '[]'),
+                remove: JSON.parse(document.getElementById('headers-remove').value || '[]'),
+              },
+            }
+            break
+          case 'MockResponse':
+            action = {
+              MockResponse: {
+                status: parseInt(document.getElementById('mock-status').value),
+                headers: [],
+                body: document.getElementById('mock-body').value,
+              },
+            }
+            break
+          case 'Block':
+            action = {
+              Block: {
+                status: parseInt(document.getElementById('block-status').value),
+                message: document.getElementById('block-message').value,
+              },
+            }
+            break
+        }
+
+        return {
+          id: currentEditingRuleId || Date.now().toString(),
+          enabled: true,
+          name: document.getElementById('rule-name').value,
+          rule_type: document.getElementById('rule-type').value,
+          match_pattern: {
+            url_pattern: document.getElementById('rule-url-pattern').value || null,
+            method: document.getElementById('rule-method').value || null,
+            content_type: null,
+          },
+          action,
+        }
+      }
+
+      // Global functions for rule actions
+      window.toggleRule = async function (ruleId, enabled) {
+        try {
+          const rules = await invoke('get_intercept_rules')
+          const rule = rules.find((r) => r.id === ruleId)
+          if (rule) {
+            rule.enabled = enabled
+            await invoke('update_intercept_rule', { rule })
+          }
+        } catch (e) {
+          showMessage('rules-status', String(e), 'error')
+          loadRules() // Reload to reset checkbox
+        }
+      }
+
+      window.editRule = async function (ruleId) {
+        try {
+          const rules = await invoke('get_intercept_rules')
+          const rule = rules.find((r) => r.id === ruleId)
+          if (rule) {
+            currentEditingRuleId = ruleId
+            document.getElementById('rule-modal-title').textContent = '编辑拦截规则'
+            fillRuleForm(rule)
+            showRuleModal()
+          }
+        } catch (e) {
+          showMessage('rules-status', String(e), 'error')
+        }
+      }
+
+      window.deleteRule = function (ruleId) {
+        ruleIdToDelete = ruleId
+        showDeleteRuleModal()
+      }
+
+      // Fill form with rule data for editing
+      function fillRuleForm(rule) {
+        document.getElementById('rule-name').value = rule.name
+        document.getElementById('rule-type').value = rule.rule_type
+        document.getElementById('rule-url-pattern').value = rule.match_pattern.url_pattern || ''
+        document.getElementById('rule-method').value = rule.match_pattern.method || ''
+
+        // Fill action params based on action type
+        const actionKey = Object.keys(rule.action)[0]
+        document.getElementById('rule-action-type').value = actionKey
+        updateActionParams()
+
+        const actionData = rule.action[actionKey]
+        switch (actionKey) {
+          case 'SaveData':
+            document.getElementById('save-request').checked = actionData.save_request
+            document.getElementById('save-response').checked = actionData.save_response
+            document.getElementById('save-file-path').value = actionData.file_path
+            break
+          case 'ModifyHeaders':
+            document.getElementById('headers-add').value = JSON.stringify(actionData.add, null, 2)
+            document.getElementById('headers-remove').value = JSON.stringify(actionData.remove, null, 2)
+            break
+          case 'MockResponse':
+            document.getElementById('mock-status').value = actionData.status
+            document.getElementById('mock-body').value = actionData.body
+            break
+          case 'Block':
+            document.getElementById('block-status').value = actionData.status
+            document.getElementById('block-message').value = actionData.message
+            break
+        }
+      }
+
+      // Rule modal controls
+      document.getElementById('rule-modal-cancel').addEventListener('click', hideRuleModal)
+      document.getElementById('rule-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'rule-modal') {
+          hideRuleModal()
+        }
+      })
+
+      // Delete rule modal controls
+      function showDeleteRuleModal() {
+        document.getElementById('delete-rule-modal').classList.add('active')
+      }
+
+      function hideDeleteRuleModal() {
+        document.getElementById('delete-rule-modal').classList.remove('active')
+      }
+
+      document.getElementById('delete-rule-cancel').addEventListener('click', () => {
+        hideDeleteRuleModal()
+      })
+
+      document.getElementById('delete-rule-confirm').addEventListener('click', async () => {
+        hideDeleteRuleModal()
+
+        if (ruleIdToDelete) {
+          try {
+            await invoke('remove_intercept_rule', { ruleId: ruleIdToDelete })
+            showMessage('rules-status', '规则已删除', 'success')
+            loadRules()
+          } catch (e) {
+            showMessage('rules-status', String(e), 'error')
+          }
+          ruleIdToDelete = null
+        }
+      })
+
+      // Click outside modal to close
+      document.getElementById('delete-rule-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'delete-rule-modal') {
+          hideDeleteRuleModal()
+        }
+      })
+
 
       // Logs
       const logContainer = document.getElementById('log-container')
@@ -860,6 +1263,7 @@
           updateCertStatus()
           refreshSaved()
           refreshCurrent()
+          loadRules()
           setInterval(updateServerStatus, 2000)
         }
       })()

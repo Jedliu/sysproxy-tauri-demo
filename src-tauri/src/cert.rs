@@ -86,9 +86,13 @@ impl CertManager {
     }
 
     /// Get the CA certificate in PEM format
-    #[allow(dead_code)]
-    pub fn get_ca_cert_pem(&self) -> &str {
-        &self.ca_cert_pem
+    pub fn get_ca_cert_pem(&self) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(self.ca_cert_pem.clone())
+    }
+
+    /// Get the CA private key in PEM format
+    pub fn get_ca_key_pem(&self) -> Result<String, Box<dyn std::error::Error>> {
+        Ok(self.ca_key_pem.clone())
     }
 
     /// Get the path to the CA certificate file
