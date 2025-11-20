@@ -1,11 +1,22 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cert;
+mod cert_installer;
+mod proxy;
+mod interceptor;
+
 use once_cell::sync::Lazy;
 use serde::Serialize;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use sysproxy::{Autoproxy, Sysproxy};
 use tauri::{generate_context, generate_handler, Builder, Emitter, RunEvent};
+use tokio::sync::mpsc;
+
+use cert::CertManager;
+use cert_installer::CertInstaller;
+use proxy::{ProxyServer, ProxyConfig, ProxyLog};
+use interceptor::{Interceptor, InterceptRule};
 
 /// 用于存储和序列化代理配置的结构体
 #[derive(Clone, Serialize, Debug, PartialEq)]
@@ -26,6 +37,24 @@ static SAVED_PROXY: Lazy<Mutex<Option<SavedProxy>>> = Lazy::new(|| Mutex::new(No
 /// 全局静态变量，用于记录最后一次通过事件发出的代理状态。
 /// 这用于去重，避免在代理状态未发生实际变化时重复发送事件。
 static LAST_EMITTED_PROXY: Lazy<Mutex<Option<SavedProxy>>> = Lazy::new(|| Mutex::new(None));
+
+/// 代理服务器状态结构
+struct ProxyServerState {
+    server: Option<Arc<ProxyServer>>,
+    interceptor: Arc<Interceptor>,
+    log_receiver: Option<mpsc::UnboundedReceiver<ProxyLog>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// 全局代理服务器状态
+static PROXY_STATE: Lazy<Mutex<ProxyServerState>> = Lazy::new(|| {
+    Mutex::new(ProxyServerState {
+        server: None,
+        interceptor: Arc::new(Interceptor::new()),
+        log_receiver: None,
+        handle: None,
+    })
+});
 
 /// 前端监听的事件名称，当代理状态发生变化时，会发出此事件。
 const PROXY_CHANGED_EVENT: &str = "proxy-changed";
@@ -177,17 +206,217 @@ fn get_current_proxy() -> Result<SavedProxy, String> {
     })
 }
 
+/// Tauri 命令：启动代理服务器
+#[tauri::command]
+async fn start_proxy_server(port: u16, enable_https_intercept: bool) -> Result<String, String> {
+    let config = ProxyConfig {
+        port,
+        enable_https_intercept,
+        log_requests: true,
+    };
+
+    let server = Arc::new(ProxyServer::new(config).map_err(|e| format!("创建代理服务器失败: {}", e))?);
+
+    // Create log channel
+    let (log_sender, log_receiver) = mpsc::unbounded_channel();
+    server.set_log_sender(log_sender);
+
+    let server_clone = Arc::clone(&server);
+    let handle = tokio::spawn(async move {
+        if let Err(e) = server_clone.start().await {
+            eprintln!("代理服务器错误: {}", e);
+        }
+    });
+
+    // Update global state
+    let mut state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.server = Some(server);
+    state.log_receiver = Some(log_receiver);
+    state.handle = Some(handle);
+
+    Ok(format!("代理服务器已启动在端口 {}", port))
+}
+
+/// Tauri 命令：停止代理服务器
+#[tauri::command]
+async fn stop_proxy_server() -> Result<String, String> {
+    let mut state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+
+    if let Some(handle) = state.handle.take() {
+        handle.abort();
+    }
+
+    state.server = None;
+    state.log_receiver = None;
+
+    Ok("代理服务器已停止".to_string())
+}
+
+/// Tauri 命令：检查代理服务器是否正在运行
+#[tauri::command]
+fn is_proxy_server_running() -> bool {
+    PROXY_STATE
+        .lock()
+        .ok()
+        .map(|s| s.server.is_some())
+        .unwrap_or(false)
+}
+
+/// Tauri 命令：安装 CA 证书
+#[tauri::command]
+async fn install_ca_certificate() -> Result<String, String> {
+    let cert_manager = CertManager::new().map_err(|e| format!("创建证书管理器失败: {}", e))?;
+    let cert_path = cert_manager.get_ca_cert_path().map_err(|e| format!("获取证书路径失败: {}", e))?;
+
+    CertInstaller::install_cert(&cert_path).map_err(|e| format!("安装证书失败: {}", e))
+}
+
+/// Tauri 命令：删除 CA 证书
+#[tauri::command]
+async fn uninstall_ca_certificate() -> Result<String, String> {
+    CertInstaller::uninstall_cert().map_err(|e| e.to_string())
+}
+
+/// Tauri 命令：检查证书是否已安装
+#[tauri::command]
+async fn is_certificate_installed() -> Result<bool, String> {
+    let cert_manager = CertManager::new().map_err(|e| format!("创建证书管理器失败: {}", e))?;
+    let cert_path = cert_manager.get_ca_cert_path().map_err(|e| format!("获取证书路径失败: {}", e))?;
+
+    Ok(CertInstaller::is_cert_installed(&cert_path))
+}
+
+/// Tauri 命令：获取 CA 证书路径
+#[tauri::command]
+async fn get_ca_cert_path() -> Result<String, String> {
+    let cert_manager = CertManager::new().map_err(|e| format!("创建证书管理器失败: {}", e))?;
+    let cert_path = cert_manager.get_ca_cert_path().map_err(|e| format!("获取证书路径失败: {}", e))?;
+
+    Ok(cert_path.to_string_lossy().to_string())
+}
+
+/// Tauri 命令：打开证书所在的文件夹
+#[tauri::command]
+fn open_cert_folder() -> Result<String, String> {
+    let cert_dir = CertManager::get_cert_dir().map_err(|e| format!("获取证书目录失败: {}", e))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&cert_dir)
+            .spawn()
+            .map_err(|e| format!("打开文件夹失败: {}", e))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&cert_dir)
+            .spawn()
+            .map_err(|e| format!("打开文件夹失败: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&cert_dir)
+            .spawn()
+            .map_err(|e| format!("打开文件夹失败: {}", e))?;
+    }
+
+    Ok(format!("已打开证书文件夹: {}", cert_dir.display()))
+}
+
+/// Tauri 命令：添加拦截规则
+#[tauri::command]
+fn add_intercept_rule(rule: InterceptRule) -> Result<(), String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.interceptor.add_rule(rule);
+    Ok(())
+}
+
+/// Tauri 命令：删除拦截规则
+#[tauri::command]
+fn remove_intercept_rule(rule_id: String) -> Result<(), String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.interceptor.remove_rule(&rule_id);
+    Ok(())
+}
+
+/// Tauri 命令：获取所有拦截规则
+#[tauri::command]
+fn get_intercept_rules() -> Result<Vec<InterceptRule>, String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    Ok(state.interceptor.get_rules())
+}
+
+/// Tauri 命令：更新拦截规则
+#[tauri::command]
+fn update_intercept_rule(rule: InterceptRule) -> Result<(), String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.interceptor.update_rule(rule);
+    Ok(())
+}
+
+/// Tauri 命令：清空所有拦截规则
+#[tauri::command]
+fn clear_intercept_rules() -> Result<(), String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.interceptor.clear_rules();
+    Ok(())
+}
+
 fn main() {
     let app = Builder::default()
         .invoke_handler(generate_handler![
             set_system_proxy,
             restore_system_proxy,
             get_saved_proxy,
-            get_current_proxy
+            get_current_proxy,
+            start_proxy_server,
+            stop_proxy_server,
+            is_proxy_server_running,
+            install_ca_certificate,
+            uninstall_ca_certificate,
+            is_certificate_installed,
+            get_ca_cert_path,
+            open_cert_folder,
+            add_intercept_rule,
+            remove_intercept_rule,
+            get_intercept_rules,
+            update_intercept_rule,
+            clear_intercept_rules,
         ])
         .setup(|app| {
             // 在应用启动时，启动一个后台线程来监听系统代理的变化
             start_proxy_change_listener(app.handle().clone());
+
+            // Start log forwarding in a background thread
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                runtime.block_on(async {
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                        let mut logs = Vec::new();
+                        {
+                            if let Ok(mut state) = PROXY_STATE.lock() {
+                                if let Some(receiver) = &mut state.log_receiver {
+                                    while let Ok(log) = receiver.try_recv() {
+                                        logs.push(log);
+                                    }
+                                }
+                            }
+                        }
+
+                        for log in logs {
+                            let _ = app_handle.emit("proxy-log", log);
+                        }
+                    }
+                });
+            });
+
             Ok(())
         })
         .build(generate_context!())
@@ -199,6 +428,12 @@ fn main() {
             RunEvent::Exit { .. } | RunEvent::ExitRequested { .. } => {
                 // 在应用退出前，自动调用恢复代理的逻辑，确保不会污染用户的系统设置
                 let _ = restore_system_proxy();
+                // 停止代理服务器
+                if let Ok(mut state) = PROXY_STATE.lock() {
+                    if let Some(handle) = state.handle.take() {
+                        handle.abort();
+                    }
+                }
             }
             _ => {}
         }

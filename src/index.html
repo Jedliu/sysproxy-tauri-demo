@@ -1,353 +1,868 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <title>Sysproxy Demo</title>
+    <title>Sysproxy Demo - 代理服务器</title>
     <style>
       :root {
-        font-family:
-          system-ui,
-          -apple-system,
-          "Segoe UI",
-          sans-serif;
+        font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
         color-scheme: light dark;
+        --primary: #2563eb;
+        --success: #16a34a;
+        --danger: #dc2626;
+        --warning: #f59e0b;
+        --border: #e5e7eb;
+        --bg-secondary: #f9fafb;
       }
+
+      * {
+        box-sizing: border-box;
+      }
+
       body {
         margin: 0;
-        padding: 24px;
+        padding: 20px;
         display: flex;
         flex-direction: column;
-        gap: 16px;
+        gap: 20px;
+        max-width: 1400px;
+        margin: 0 auto;
       }
-      label {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
+
+      h1,
+      h2,
+      h3 {
+        margin: 0 0 12px 0;
         font-weight: 600;
       }
-      input {
-        padding: 8px 10px;
+
+      h1 {
+        font-size: 24px;
+      }
+      h2 {
+        font-size: 18px;
+      }
+      h3 {
+        font-size: 16px;
+      }
+
+      .tabs {
+        display: flex;
+        gap: 8px;
+        border-bottom: 2px solid var(--border);
+        margin-bottom: 20px;
+      }
+
+      .tab {
+        padding: 10px 20px;
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 500;
+        color: #6b7280;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -2px;
+      }
+
+      .tab.active {
+        color: var(--primary);
+        border-bottom-color: var(--primary);
+      }
+
+      .tab-content {
+        display: none;
+      }
+
+      .tab-content.active {
+        display: block;
+      }
+
+      .card {
+        padding: 20px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: white;
+      }
+
+      .form-group {
+        margin-bottom: 16px;
+      }
+
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 6px;
+        font-size: 14px;
+      }
+
+      input[type='text'],
+      input[type='number'],
+      textarea,
+      select {
+        width: 100%;
+        padding: 10px;
         font-size: 14px;
         border-radius: 6px;
-        border: 1px solid #ccc;
+        border: 1px solid var(--border);
+        font-family: inherit;
       }
-      button {
-        padding: 10px 14px;
+
+      input[type='checkbox'] {
+        width: auto;
+        margin: 0;
+        cursor: pointer;
+      }
+
+      textarea {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          monospace;
+        resize: vertical;
+      }
+
+      .btn {
+        padding: 10px 16px;
         font-size: 14px;
         border: none;
         border-radius: 6px;
         cursor: pointer;
-        background: #2563eb;
-        color: #fff;
+        font-weight: 500;
+        transition: opacity 0.2s;
       }
-      button.secondary {
+
+      .btn:hover:not(:disabled) {
+        opacity: 0.9;
+      }
+
+      .btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .btn-primary {
+        background: var(--primary);
+        color: white;
+      }
+      .btn-success {
+        background: var(--success);
+        color: white;
+      }
+      .btn-danger {
+        background: var(--danger);
+        color: white;
+      }
+      .btn-secondary {
         background: #6b7280;
+        color: white;
       }
-      #status {
-        min-height: 20px;
+      .btn-sm {
+        padding: 6px 12px;
+        font-size: 12px;
+      }
+
+      .btn-group {
+        display: flex;
+        gap: 10px;
+      }
+
+      .status-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 500;
+      }
+
+      .status-running {
+        background: #dcfce7;
+        color: var(--success);
+      }
+      .status-stopped {
+        background: #fee2e2;
+        color: var(--danger);
+      }
+
+      .log-container {
+        max-height: 400px;
+        overflow-y: auto;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px;
+        background: #f9fafb;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+      }
+
+      .log-entry {
+        padding: 8px;
+        margin-bottom: 4px;
+        border-left: 3px solid var(--border);
+        background: white;
+      }
+
+      .log-entry.success {
+        border-left-color: var(--success);
+      }
+      .log-entry.error {
+        border-left-color: var(--danger);
+      }
+
+      .rule-item {
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        margin-bottom: 10px;
+        background: white;
+      }
+
+      .rule-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+
+      .rule-name {
+        font-weight: 600;
+        font-size: 14px;
+      }
+
+      .rule-details {
+        font-size: 12px;
+        color: #6b7280;
+      }
+
+      .switch {
+        position: relative;
+        display: inline-block;
+        width: 44px;
+        height: 24px;
+      }
+
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #ccc;
+        transition: 0.4s;
+        border-radius: 24px;
+      }
+
+      .slider:before {
+        position: absolute;
+        content: '';
+        height: 18px;
+        width: 18px;
+        left: 3px;
+        bottom: 3px;
+        background-color: white;
+        transition: 0.4s;
+        border-radius: 50%;
+      }
+
+      input:checked + .slider {
+        background-color: var(--success);
+      }
+
+      input:checked + .slider:before {
+        transform: translateX(20px);
+      }
+
+      .grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+      }
+
+      @media (max-width: 768px) {
+        .grid-2 {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .cert-info {
+        padding: 12px;
+        background: var(--bg-secondary);
+        border-radius: 6px;
         font-size: 13px;
+        margin-top: 10px;
+      }
+
+      .message {
+        padding: 12px;
+        border-radius: 6px;
+        margin-bottom: 16px;
+        font-size: 14px;
+        white-space: pre-line; /* Preserve line breaks */
+        line-height: 1.6;
+      }
+
+      .message.success {
+        background: #dcfce7;
+        color: var(--success);
+      }
+      .message.error {
+        background: #fee2e2;
+        color: var(--danger);
+      }
+      .message.info {
+        background: #dbeafe;
+        color: #2563eb;
+      }
+
+      /* 确认对话框样式 */
+      .modal-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        z-index: 1000;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .modal-overlay.active {
+        display: flex;
+      }
+
+      .modal-content {
+        background: white;
+        padding: 24px;
+        border-radius: 8px;
+        max-width: 400px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      }
+
+      .modal-header {
+        font-size: 18px;
+        font-weight: 600;
+        margin-bottom: 16px;
+        color: var(--danger);
+      }
+
+      .modal-body {
+        margin-bottom: 20px;
+        line-height: 1.6;
+      }
+
+      .modal-footer {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
       }
     </style>
   </head>
   <body>
-    <h2>设置系统代理</h2>
-    <label>
-      代理 IP
-      <input id="host" placeholder="例如 127.0.0.1" value="127.0.0.1" />
-    </label>
-    <label>
-      代理端口
-      <input id="port" type="number" placeholder="例如 7890" value="7890" />
-    </label>
-    <div style="display: flex; gap: 10px">
-      <button id="apply">应用代理</button>
-      <button id="restore" class="secondary">恢复原代理</button>
+    <h1>🚀 Sysproxy 代理服务器</h1>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="server">代理服务器</button>
+      <button class="tab" data-tab="system">系统代理</button>
+      <button class="tab" data-tab="certificate">证书管理</button>
+      <button class="tab" data-tab="rules">拦截规则</button>
+      <button class="tab" data-tab="logs">日志查看</button>
     </div>
-    <label>
-      原代理配置（JSON，首次保存后显示）
-      <textarea
-        id="saved"
-        rows="12"
-        readonly
-        style="
-          width: 100%;
-          font-family:
-            ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-            &quot;Liberation Mono&quot;, &quot;Courier New&quot;, monospace;
-        "
-      ></textarea>
-    </label>
-    <label>
-      当前系统代理（JSON）
-      <div style="display: flex; gap: 8px; align-items: center">
-        <button id="current">获取当前代理</button>
-        <span
-          id="current-status"
-          style="font-size: 12px; color: #6b7280"
-        ></span>
+
+    <!-- 代理服务器 -->
+    <div class="tab-content active" id="tab-server">
+      <div class="card">
+        <h2>代理服务器控制</h2>
+        <div
+          id="server-status"
+          class="message info"
+          style="display: none"
+        ></div>
+
+        <div class="form-group">
+          <label>
+            服务器状态
+            <span id="status-badge" class="status-indicator status-stopped"
+              >● 未运行</span
+            >
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label for="proxy-port">监听端口</label>
+          <input
+            type="number"
+            id="proxy-port"
+            value="8888"
+            min="1024"
+            max="65535"
+          />
+        </div>
+
+        <div class="form-group">
+          <label style="display: flex; align-items: center; gap: 10px">
+            <input type="checkbox" id="enable-https" checked />
+            启用 HTTPS 拦截（MITM）
+          </label>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-success" id="start-server">
+            启动代理服务器
+          </button>
+          <button class="btn btn-danger" id="stop-server" disabled>
+            停止代理服务器
+          </button>
+        </div>
       </div>
-      <textarea
-        id="current-text"
-        rows="12"
-        readonly
-        style="
-          width: 100%;
-          font-family:
-            ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-            &quot;Liberation Mono&quot;, &quot;Courier New&quot;, monospace;
-        "
-      ></textarea>
-    </label>
-    <div id="status"></div>
+    </div>
+
+    <!-- 系统代理 -->
+    <div class="tab-content" id="tab-system">
+      <div class="card">
+        <h2>系统代理设置</h2>
+        <div id="system-status" class="message" style="display: none"></div>
+
+        <div class="form-group">
+          <label for="host">代理 IP</label>
+          <input id="host" placeholder="例如 127.0.0.1" value="127.0.0.1" />
+        </div>
+
+        <div class="form-group">
+          <label for="port">代理端口</label>
+          <input id="port" type="number" placeholder="例如 8888" value="8888" />
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-primary" id="apply">应用代理</button>
+          <button class="btn btn-secondary" id="restore">恢复原代理</button>
+        </div>
+
+        <div class="form-group" style="margin-top: 20px">
+          <label>原代理配置（JSON，首次保存后显示）</label>
+          <textarea id="saved" rows="8" readonly></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>
+            当前系统代理（JSON）
+            <button
+              class="btn btn-sm btn-secondary"
+              id="current"
+              style="margin-left: 10px"
+            >
+              刷新
+            </button>
+          </label>
+          <textarea id="current-text" rows="8" readonly></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- 证书管理 -->
+    <div class="tab-content" id="tab-certificate">
+      <div class="card">
+        <h2>HTTPS 证书管理</h2>
+        <div id="cert-status" class="message" style="display: none"></div>
+
+        <p>为了拦截 HTTPS 流量，需要安装自签名的 CA 证书到系统信任存储。</p>
+
+        <div class="cert-info">
+          <div>
+            <strong>证书状态:</strong>
+            <span id="cert-installed">检查中...</span>
+          </div>
+          <div>
+            <strong>证书路径:</strong> <span id="cert-path">加载中...</span>
+          </div>
+        </div>
+
+        <div class="btn-group" style="margin-top: 16px">
+          <button class="btn btn-primary" id="install-cert">安装证书</button>
+          <button class="btn btn-danger" id="uninstall-cert">删除证书</button>
+          <button class="btn btn-secondary" id="check-cert">
+            检查证书状态
+          </button>
+          <button class="btn btn-secondary" id="open-cert-folder">
+            打开证书文件夹
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 拦截规则 -->
+    <div class="tab-content" id="tab-rules">
+      <div class="card">
+        <h2>HTTP/HTTPS 拦截规则</h2>
+        <div id="rules-status" class="message" style="display: none"></div>
+
+        <button
+          class="btn btn-primary"
+          id="add-rule-btn"
+          style="margin-bottom: 16px"
+        >
+          + 添加新规则
+        </button>
+
+        <div id="rules-container">
+          <p style="color: #6b7280">暂无规则。点击上方按钮添加规则。</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 日志查看 -->
+    <div class="tab-content" id="tab-logs">
+      <div class="card">
+        <h2>
+          代理日志
+          <button
+            class="btn btn-sm btn-secondary"
+            id="clear-logs"
+            style="margin-left: 10px"
+          >
+            清空日志
+          </button>
+        </h2>
+
+        <div class="log-container" id="log-container">
+          <div style="color: #6b7280">等待日志...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 确认删除对话框 -->
+    <div class="modal-overlay" id="confirm-modal">
+      <div class="modal-content">
+        <div class="modal-header">⚠️ 确认删除证书</div>
+        <div class="modal-body">
+          您确定要删除 Sysproxy MITM CA 证书吗？<br /><br />
+          删除后将无法拦截 HTTPS 流量。
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="modal-cancel">取消</button>
+          <button class="btn btn-danger" id="modal-confirm">确定删除</button>
+        </div>
+      </div>
+    </div>
 
     <script type="module">
-      // --- DOM 元素获取 ---
-      const hostInput = document.getElementById("host");
-      const portInput = document.getElementById("port");
-      const status = document.getElementById("status");
+      // Tauri API
+      let invoke = null
+      let listen = null
 
-      // --- UI 更新函数 ---
-
-      /**
-       * 渲染底部状态消息
-       * @param {string} text - 要显示的消息文本
-       * @param {boolean} [isError=false] - 是否为错误消息（用于设置颜色）
-       */
-      const renderStatus = (text, isError = false) => {
-        status.textContent = text;
-        status.style.color = isError ? "#dc2626" : "#16a34a";
-      };
-
-      /**
-       * 将数据显示在“原代理配置”文本域中
-       * @param {object | null} data - 从后端获取的代理配置对象
-       */
-      const renderSaved = (data) => {
-        const saved = document.getElementById("saved");
-        saved.value = data ? JSON.stringify(data, null, 2) : "";
-      };
-
-      /**
-       * 将数据显示在“当前系统代理”文本域中
-       * @param {object | null} data - 从后端获取的代理配置对象
-       * @param {string} [msg=""] - 显示在旁边的状态文本，如“加载中...”
-       */
-      const renderCurrent = (data, msg = "") => {
-        const el = document.getElementById("current-text");
-        el.value = data ? JSON.stringify(data, null, 2) : "";
-        const st = document.getElementById("current-status");
-        st.textContent = msg;
-      };
-
-      // --- Tauri 后端通信 ---
-
-      // 全局变量，用于缓存 Tauri API 函数，避免重复加载
-      let tauriBridge = null;
-      // 用于防止重复初始化
-      let bridgeInitPromise = null;
-
-      /**
-       * 动态加载并返回 Tauri 的 `invoke` 函数。
-       * 这是与后端 Rust 命令通信的核心函数。
-       * 函数会尝试多种方式加载 API，以兼容不同环境。
-       * @returns {Promise<Function|null>}
-       */
-      const loadInvokeFn = async () => {
+      async function initTauri() {
         if (window.__TAURI__?.core?.invoke) {
-          return window.__TAURI__.core.invoke;
+          invoke = window.__TAURI__.core.invoke
         }
-        const candidates = [
-          "tauri://localhost/.tauri/api.js",
-          "/.tauri/api.js",
-        ];
-        for (const url of candidates) {
-          try {
-            const api = await import(url);
-            if (api?.invoke) return api.invoke;
-            if (api?.core?.invoke) return api.core.invoke;
-          } catch (e) {
-            console.warn("load tauri core failed", url, e);
-          }
-        }
-        return null;
-      };
-
-      /**
-       * 动态加载并返回 Tauri 的 `listen` 函数。
-       * 这是监听后端 Rust 事件的核心函数。
-       * @returns {Promise<Function|null>}
-       */
-      const loadListenFn = async () => {
         if (window.__TAURI__?.event?.listen) {
-          return window.__TAURI__.event.listen;
+          listen = window.__TAURI__.event.listen
         }
-        const candidates = [
-          "tauri://localhost/@tauri-apps/api/event",
-          "tauri://localhost/.tauri/api.js",
-          "/.tauri/api.js",
-        ];
-        for (const url of candidates) {
+
+        if (!invoke || !listen) {
+          showMessage('system-status', 'Tauri API 未加载', 'error')
+          return false
+        }
+        return true
+      }
+
+      // Utility functions
+      function showMessage(containerId, message, type = 'info') {
+        const container = document.getElementById(containerId)
+        if (container) {
+          container.innerText = message // Use innerText to preserve line breaks
+          container.className = `message ${type}`
+          container.style.display = 'block'
+
+          // Don't auto-hide error messages (they often contain important instructions)
+          // Success and info messages auto-hide after 10 seconds
+          if (type !== 'error') {
+            setTimeout(() => {
+              container.style.display = 'none'
+            }, 10000)
+          }
+        }
+      }
+
+      // Tab switching
+      document.querySelectorAll('.tab').forEach((tab) => {
+        tab.addEventListener('click', () => {
+          document
+            .querySelectorAll('.tab')
+            .forEach((t) => t.classList.remove('active'))
+          document
+            .querySelectorAll('.tab-content')
+            .forEach((c) => c.classList.remove('active'))
+
+          tab.classList.add('active')
+          document
+            .getElementById(`tab-${tab.dataset.tab}`)
+            .classList.add('active')
+        })
+      })
+
+      // Server controls
+      async function updateServerStatus() {
+        if (!invoke) return
+        try {
+          const running = await invoke('is_proxy_server_running')
+          const badge = document.getElementById('status-badge')
+          const startBtn = document.getElementById('start-server')
+          const stopBtn = document.getElementById('stop-server')
+
+          if (running) {
+            badge.textContent = '● 运行中'
+            badge.className = 'status-indicator status-running'
+            startBtn.disabled = true
+            stopBtn.disabled = false
+          } else {
+            badge.textContent = '● 未运行'
+            badge.className = 'status-indicator status-stopped'
+            startBtn.disabled = false
+            stopBtn.disabled = true
+          }
+        } catch (e) {
+          console.error('Failed to check server status:', e)
+        }
+      }
+
+      document
+        .getElementById('start-server')
+        .addEventListener('click', async () => {
+          const port = parseInt(document.getElementById('proxy-port').value)
+          const enableHttps = document.getElementById('enable-https').checked
+
           try {
-            const mod = await import(url);
-            if (typeof mod?.listen === "function") {
-              return mod.listen;
-            }
-            if (typeof mod?.event?.listen === "function") {
-              return mod.event.listen;
-            }
+            const result = await invoke('start_proxy_server', {
+              port,
+              enableHttpsIntercept: enableHttps,
+            })
+            showMessage('server-status', result, 'success')
+            await updateServerStatus()
           } catch (e) {
-            console.warn("load tauri event failed", url, e);
+            showMessage('server-status', String(e), 'error')
           }
+        })
+
+      document
+        .getElementById('stop-server')
+        .addEventListener('click', async () => {
+          try {
+            const result = await invoke('stop_proxy_server')
+            showMessage('server-status', result, 'success')
+            await updateServerStatus()
+          } catch (e) {
+            showMessage('server-status', String(e), 'error')
+          }
+        })
+
+      // System proxy controls
+      document.getElementById('apply').addEventListener('click', async () => {
+        const host = document.getElementById('host').value.trim()
+        const port = parseInt(document.getElementById('port').value)
+
+        try {
+          await invoke('set_system_proxy', { host, port })
+          showMessage(
+            'system-status',
+            `已设置系统代理为 ${host}:${port}`,
+            'success'
+          )
+          refreshSaved()
+          refreshCurrent()
+        } catch (e) {
+          showMessage('system-status', String(e), 'error')
         }
-        return window.__TAURI__?.event?.listen ?? null;
-      };
+      })
 
-      /**
-       * 确保 Tauri 的 invoke 和 listen 函数已加载并可用。
-       * 使用单例模式确保初始化逻辑只执行一次。
-       * @returns {Promise<{invoke: Function, listen: Function}|null>}
-       */
-      const ensureTauriBridge = async () => {
-        if (tauriBridge) return tauriBridge;
-        if (bridgeInitPromise) return bridgeInitPromise;
+      document.getElementById('restore').addEventListener('click', async () => {
+        try {
+          await invoke('restore_system_proxy')
+          showMessage('system-status', '已恢复原代理配置', 'success')
+          refreshSaved()
+          refreshCurrent()
+        } catch (e) {
+          showMessage('system-status', String(e), 'error')
+        }
+      })
 
-        bridgeInitPromise = (async () => {
-          const invoke = await loadInvokeFn();
-          if (!invoke) {
-            renderStatus("未检测到 Tauri 注入，请用 `pnpm dev` 启动", true);
-            return null;
+      document
+        .getElementById('current')
+        .addEventListener('click', refreshCurrent)
+
+      async function refreshSaved() {
+        try {
+          const data = await invoke('get_saved_proxy')
+          document.getElementById('saved').value = data
+            ? JSON.stringify(data, null, 2)
+            : ''
+        } catch (e) {
+          console.error('Failed to get saved proxy:', e)
+        }
+      }
+
+      async function refreshCurrent() {
+        try {
+          const data = await invoke('get_current_proxy')
+          document.getElementById('current-text').value = JSON.stringify(
+            data,
+            null,
+            2
+          )
+        } catch (e) {
+          showMessage('system-status', String(e), 'error')
+        }
+      }
+
+      // Certificate management
+      async function updateCertStatus() {
+        try {
+          const [installed, path] = await Promise.all([
+            invoke('is_certificate_installed'),
+            invoke('get_ca_cert_path'),
+          ])
+
+          document.getElementById('cert-installed').textContent = installed
+            ? '✅ 已安装'
+            : '❌ 未安装'
+          document.getElementById('cert-path').textContent = path
+        } catch (e) {
+          document.getElementById('cert-installed').textContent = '检查失败'
+          document.getElementById('cert-path').textContent = 'N/A'
+        }
+      }
+
+      document
+        .getElementById('install-cert')
+        .addEventListener('click', async () => {
+          try {
+            const result = await invoke('install_ca_certificate')
+            showMessage('cert-status', result, 'success')
+            await updateCertStatus()
+          } catch (e) {
+            showMessage('cert-status', String(e), 'error')
+          }
+        })
+
+      document
+        .getElementById('uninstall-cert')
+        .addEventListener('click', async () => {
+          // 显示自定义确认对话框
+          showConfirmModal()
+        })
+
+      // 确认对话框逻辑
+      function showConfirmModal() {
+        const modal = document.getElementById('confirm-modal')
+        modal.classList.add('active')
+      }
+
+      function hideConfirmModal() {
+        const modal = document.getElementById('confirm-modal')
+        modal.classList.remove('active')
+      }
+
+      document.getElementById('modal-cancel').addEventListener('click', () => {
+        hideConfirmModal()
+      })
+
+      document
+        .getElementById('modal-confirm')
+        .addEventListener('click', async () => {
+          hideConfirmModal()
+
+          try {
+            const result = await invoke('uninstall_ca_certificate')
+            showMessage('cert-status', result, 'success')
+            await updateCertStatus()
+          } catch (e) {
+            showMessage('cert-status', String(e), 'error')
+          }
+        })
+
+      // 点击模态框背景关闭
+      document
+        .getElementById('confirm-modal')
+        .addEventListener('click', (e) => {
+          if (e.target.id === 'confirm-modal') {
+            hideConfirmModal()
+          }
+        })
+
+      document
+        .getElementById('check-cert')
+        .addEventListener('click', updateCertStatus)
+
+      document
+        .getElementById('open-cert-folder')
+        .addEventListener('click', async () => {
+          try {
+            const result = await invoke('open_cert_folder')
+            showMessage('cert-status', result, 'success')
+          } catch (e) {
+            showMessage('cert-status', String(e), 'error')
+          }
+        })
+
+      // Rules management (simplified)
+      document.getElementById('add-rule-btn').addEventListener('click', () => {
+        showMessage('rules-status', '规则管理功能开发中...', 'info')
+      })
+
+      // Logs
+      const logContainer = document.getElementById('log-container')
+      const logs = []
+
+      if (listen) {
+        listen('proxy-log', (event) => {
+          const log = event.payload
+          logs.push(log)
+
+          const entry = document.createElement('div')
+          entry.className = 'log-entry'
+          entry.innerHTML = `
+            <div><strong>${log.timestamp}</strong> ${log.method} ${log.url}</div>
+            <div style="color: #6b7280; font-size: 11px;">
+              Status: ${log.status} | Request: ${log.request_size}B | Response: ${log.response_size}B
+            </div>
+          `
+
+          if (logs.length === 1) {
+            logContainer.innerHTML = ''
           }
 
-          const listen = await loadListenFn();
-          tauriBridge = { invoke, listen };
-          return tauriBridge;
-        })();
+          logContainer.appendChild(entry)
+          logContainer.scrollTop = logContainer.scrollHeight
 
-        const bridge = await bridgeInitPromise;
-        if (!bridge) {
-          bridgeInitPromise = null;
-        }
-        return bridge;
-      };
-
-      /**
-       * 获取 `invoke` 函数的便捷方法。
-       * @returns {Promise<Function|null>}
-       */
-      const getInvoke = async () => {
-        const bridge = await ensureTauriBridge();
-        return bridge?.invoke ?? null;
-      };
-
-      // --- 业务逻辑函数 ---
-
-      /**
-       * 调用后端命令 `get_saved_proxy` 并更新 UI。
-       */
-      const refreshSaved = async () => {
-        const invoke = await getInvoke();
-        if (!invoke) return;
-        try {
-          const data = await invoke("get_saved_proxy");
-          renderSaved(data);
-        } catch (e) {
-          console.warn("get_saved_proxy failed", e);
-        }
-      };
-
-      /**
-       * 设置监听器以接收来自后端的代理变化事件。
-       */
-      const setupProxyChangeListener = async () => {
-        console.log("设置代理变化监听器...");
-        const bridge = await ensureTauriBridge();
-        if (!bridge?.listen) {
-          console.warn("proxy listener missing tauri event API");
-          return;
-        }
-        try {
-          // 监听 "proxy-changed" 事件
-          await bridge.listen("proxy-changed", (event) => {
-            console.log("收到 proxy-changed 事件:", event);
-            if (event?.payload) {
-              renderCurrent(event.payload, "监听到系统代理变化");
-            }
-          });
-          console.log("代理变化监听器设置成功");
-
-          // 监听器设置成功后，立即获取一次当前代理信息以作初始化显示
-          const invoke = await getInvoke();
-          if (invoke) {
-            try {
-              const data = await invoke("get_current_proxy");
-              renderCurrent(data, "初始加载");
-              console.log("初始代理信息已加载:", data);
-            } catch (e) {
-              console.warn("获取初始代理信息失败", e);
-            }
+          if (logs.length > 100) {
+            logs.shift()
+            logContainer.removeChild(logContainer.firstChild)
           }
-        } catch (e) {
-          console.warn("failed to listen proxy changes", e);
-        }
-      };
+        })
+      }
 
-      // --- 事件监听器绑定 ---
+      document.getElementById('clear-logs').addEventListener('click', () => {
+        logs.length = 0
+        logContainer.innerHTML = '<div style="color: #6b7280;">日志已清空</div>'
+      })
 
-      // “应用代理”按钮点击事件
-      document.getElementById("apply").addEventListener("click", async () => {
-        const invoke = await getInvoke();
-        if (!invoke) return;
-        const host = hostInput.value.trim();
-        const port = Number(portInput.value);
-        if (!host || Number.isNaN(port) || port <= 0 || port > 65535) {
-          renderStatus("请输入合法的 IP 和端口（1-65535）", true);
-          return;
+      // Initialize
+      ;(async () => {
+        if (await initTauri()) {
+          updateServerStatus()
+          updateCertStatus()
+          refreshSaved()
+          refreshCurrent()
+          setInterval(updateServerStatus, 2000)
         }
-        renderStatus("正在设置...");
-        try {
-          await invoke("set_system_proxy", { host, port });
-          renderStatus(`已设置系统代理为 ${host}:${port}`);
-          refreshSaved(); // 设置成功后，刷新一下“原代理”的显示
-        } catch (e) {
-          console.error(e);
-          renderStatus(`设置失败：${e}`, true);
-        }
-      });
-
-      // “恢复原代理”按钮点击事件
-      document.getElementById("restore").addEventListener("click", async () => {
-        const invoke = await getInvoke();
-        if (!invoke) return;
-        renderStatus("正在恢复原代理/关闭代理...");
-        try {
-          await invoke("restore_system_proxy");
-          renderStatus("已恢复原代理（若无记录则已关闭）");
-          refreshSaved(); // 恢复后，“原代理”记录理论上被清空了
-        } catch (e) {
-          console.error(e);
-          renderStatus(`恢复失败：${e}`, true);
-        }
-      });
-
-      // “获取当前代理”按钮点击事件
-      document.getElementById("current").addEventListener("click", async () => {
-        const invoke = await getInvoke();
-        if (!invoke) return;
-        renderCurrent(null, "获取中...");
-        try {
-          const data = await invoke("get_current_proxy");
-          renderCurrent(data, "已获取");
-        } catch (e) {
-          console.error(e);
-          renderCurrent(null, "获取失败");
-        }
-      });
-
-      // --- 初始化 ---
-      // 页面加载后立即启动代理变化监听
-      setupProxyChangeListener();
-      // 并获取一次已保存的代理信息
-      refreshSaved();
+      })()
     </script>
   </body>
 </html>
