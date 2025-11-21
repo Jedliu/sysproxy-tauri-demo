@@ -110,6 +110,41 @@ impl ProxyServer {
         *self.log_sender.write() = Some(sender);
     }
 
+    /// 检查端口是否可用
+    ///
+    /// 在启动服务器之前，检查指定的端口是否已被占用。
+    /// 这个方法会尝试绑定端口，然后立即释放，以测试端口的可用性。
+    ///
+    /// # 返回
+    /// - `Ok(())`: 端口可用
+    /// - `Err(...)`: 端口被占用，返回详细的错误信息
+    pub async fn check_port(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let addr = SocketAddr::from(([127, 0, 0, 1], self.config.port));
+
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                // 端口可用，立即关闭测试监听器
+                drop(listener);
+                Ok(())
+            }
+            Err(e) => {
+                // 端口被占用，返回友好的错误消息
+                Err(format!(
+                    "端口 {} 已被占用，无法启动代理服务器。\n\n\
+                    可能的原因：\n\
+                    1. 已经有另一个代理服务器在运行\n\
+                    2. 该端口被其他程序占用\n\n\
+                    解决方法：\n\
+                    1. 在设置中更改代理端口\n\
+                    2. 或者关闭占用该端口的程序\n\n\
+                    错误详情: {}",
+                    self.config.port,
+                    e
+                ).into())
+            }
+        }
+    }
+
     /// 内部方法：发送日志到通道
     fn log_request(&self, log: ProxyLog) {
         if let Some(sender) = self.log_sender.read().as_ref() {
@@ -124,6 +159,8 @@ impl ProxyServer {
     /// 2. 配置 CA 证书（用于 HTTPS MITM）
     /// 3. 创建 hudsucker 代理实例
     /// 4. 开始接受连接
+    ///
+    /// 注意：在调用此方法之前，应该先调用 `check_port()` 检查端口是否可用
     ///
     /// # 返回
     /// 这个方法会一直运行直到出错或被停止

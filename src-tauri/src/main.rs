@@ -223,10 +223,15 @@ async fn start_proxy_server(port: u16, enable_https_intercept: bool) -> Result<S
 
     let server = Arc::new(ProxyServer::new(config, interceptor).map_err(|e| format!("创建代理服务器失败: {}", e))?);
 
+    // 重要：在启动服务器之前先检查端口是否可用
+    // 这样可以在端口被占用时立即返回错误给前端，而不是在后台任务中才发现
+    server.check_port().await.map_err(|e| e.to_string())?;
+
     // Create log channel
     let (log_sender, log_receiver) = mpsc::unbounded_channel();
     server.set_log_sender(log_sender);
 
+    // 端口检查通过后，在后台启动代理服务器
     let server_clone = Arc::clone(&server);
     let handle = tokio::spawn(async move {
         if let Err(e) = server_clone.start().await {
