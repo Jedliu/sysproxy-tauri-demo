@@ -1223,34 +1223,6 @@
       const logContainer = document.getElementById('log-container')
       const logs = []
 
-      if (listen) {
-        listen('proxy-log', (event) => {
-          const log = event.payload
-          logs.push(log)
-
-          const entry = document.createElement('div')
-          entry.className = 'log-entry'
-          entry.innerHTML = `
-            <div><strong>${log.timestamp}</strong> ${log.method} ${log.url}</div>
-            <div style="color: #6b7280; font-size: 11px;">
-              Status: ${log.status} | Request: ${log.request_size}B | Response: ${log.response_size}B
-            </div>
-          `
-
-          if (logs.length === 1) {
-            logContainer.innerHTML = ''
-          }
-
-          logContainer.appendChild(entry)
-          logContainer.scrollTop = logContainer.scrollHeight
-
-          if (logs.length > 100) {
-            logs.shift()
-            logContainer.removeChild(logContainer.firstChild)
-          }
-        })
-      }
-
       document.getElementById('clear-logs').addEventListener('click', () => {
         logs.length = 0
         logContainer.innerHTML = '<div style="color: #6b7280;">日志已清空</div>'
@@ -1259,6 +1231,45 @@
       // Initialize
       ;(async () => {
         if (await initTauri()) {
+          // 监听代理日志事件
+          listen('proxy-log', (event) => {
+            const log = event.payload
+            logs.push(log)
+
+            const entry = document.createElement('div')
+            entry.className = 'log-entry'
+            entry.innerHTML = `
+              <div><strong>${log.timestamp}</strong> ${log.method} ${log.url}</div>
+              <div style="color: #6b7280; font-size: 11px;">
+                Status: ${log.status} | Request: ${log.request_size}B | Response: ${log.response_size}B
+              </div>
+            `
+
+            if (logs.length === 1) {
+              logContainer.innerHTML = ''
+            }
+
+            logContainer.appendChild(entry)
+            logContainer.scrollTop = logContainer.scrollHeight
+
+            if (logs.length > 100) {
+              logs.shift()
+              logContainer.removeChild(logContainer.firstChild)
+            }
+          })
+
+          // 监听系统代理变更事件
+          listen('proxy-changed', (event) => {
+            console.log('Proxy changed:', event.payload)
+            // 更新当前系统代理显示
+            const data = event.payload
+            document.getElementById('current-text').value = JSON.stringify(
+              data,
+              null,
+              2
+            )
+          })
+
           updateServerStatus()
           updateCertStatus()
           refreshSaved()

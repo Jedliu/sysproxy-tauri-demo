@@ -44,6 +44,8 @@ struct ProxyServerState {
     interceptor: Arc<Interceptor>,
     log_receiver: Option<mpsc::UnboundedReceiver<ProxyLog>>,
     handle: Option<tokio::task::JoinHandle<()>>,
+    /// 停止信号发送端（用于优雅地停止代理服务器）
+    shutdown_sender: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// 全局代理服务器状态
@@ -53,6 +55,7 @@ static PROXY_STATE: Lazy<Mutex<ProxyServerState>> = Lazy::new(|| {
         interceptor: Arc::new(Interceptor::new()),
         log_receiver: None,
         handle: None,
+        shutdown_sender: None,
     })
 });
 
@@ -126,9 +129,10 @@ fn set_system_proxy(host: String, port: u16) -> Result<(), String> {
         .map_err(|e| format!("设置系统代理失败: {e}"))
 }
 
-/// Tauri 命令：恢复到原始的系统代理配置，或者在没有原始配置时直接关闭代理。
+/// Tauri 命令：恢复到原始的系统代理配置
 ///
-/// 这个函数现在合并了原 `reset_system_proxy` 的功能。
+/// 只有在用户使用过"应用代理"功能时才会执行恢复操作。
+/// 如果用户从未使用"应用代理"，则不会修改系统代理设置。
 ///
 /// # Returns
 ///
@@ -145,6 +149,7 @@ fn restore_system_proxy() -> Result<(), String> {
 
     if let Some(saved) = saved_option {
         // 如果有保存的配置，则按配置还原
+        println!("恢复系统代理配置：{}:{}", saved.sys_host, saved.sys_port);
         let auto = Autoproxy {
             enable: saved.auto_enable,
             url: saved.auto_url.into(),
@@ -160,19 +165,9 @@ fn restore_system_proxy() -> Result<(), String> {
         sys.set_system_proxy()
             .map_err(|e| format!("还原系统代理失败: {e}"))?;
     } else {
-        // 如果没有保存的配置，则直接关闭当前所有代理（手动和自动）
-        let mut sysproxy = Sysproxy::get_system_proxy().unwrap_or_default();
-        let mut autoproxy = Autoproxy::get_auto_proxy().unwrap_or_default();
-
-        sysproxy.enable = false;
-        autoproxy.enable = false;
-
-        autoproxy
-            .set_auto_proxy()
-            .map_err(|e| format!("关闭自动代理失败: {e}"))?;
-        sysproxy
-            .set_system_proxy()
-            .map_err(|e| format!("关闭系统代理失败: {e}"))?;
+        // 如果没有保存的配置，说明用户从未使用过"应用代理"功能
+        // 此时不应该修改系统代理设置，保持用户原有的代理配置
+        println!("未找到保存的代理配置，跳过恢复操作（保持当前系统代理不变）");
     }
     Ok(())
 }
@@ -231,12 +226,25 @@ async fn start_proxy_server(port: u16, enable_https_intercept: bool) -> Result<S
     let (log_sender, log_receiver) = mpsc::unbounded_channel();
     server.set_log_sender(log_sender);
 
+    // 创建停止信号通道
+    let (shutdown_sender, mut shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
+
     // 端口检查通过后，在后台启动代理服务器
     let server_clone = Arc::clone(&server);
     let handle = tokio::spawn(async move {
-        if let Err(e) = server_clone.start().await {
-            eprintln!("代理服务器错误: {}", e);
+        // 使用 tokio::select! 同时等待代理服务器和停止信号
+        tokio::select! {
+            result = server_clone.start() => {
+                if let Err(e) = result {
+                    eprintln!("代理服务器错误: {}", e);
+                }
+            }
+            _ = &mut shutdown_receiver => {
+                println!("收到停止信号，代理服务器正在关闭...");
+                // 停止信号收到，任务将结束
+            }
         }
+        println!("代理服务器已完全停止");
     });
 
     // Update global state
@@ -244,6 +252,7 @@ async fn start_proxy_server(port: u16, enable_https_intercept: bool) -> Result<S
     state.server = Some(server);
     state.log_receiver = Some(log_receiver);
     state.handle = Some(handle);
+    state.shutdown_sender = Some(shutdown_sender);
 
     Ok(format!("代理服务器已启动在端口 {}", port))
 }
@@ -251,16 +260,68 @@ async fn start_proxy_server(port: u16, enable_https_intercept: bool) -> Result<S
 /// Tauri 命令：停止代理服务器
 #[tauri::command]
 async fn stop_proxy_server() -> Result<String, String> {
-    let mut state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    // 首先自动清除系统代理设置
+    // 这样可以最大程度减少应用继续尝试连接的情况
+    println!("停止代理服务器：正在清除系统代理设置...");
+    let _ = restore_system_proxy();
 
-    if let Some(handle) = state.handle.take() {
-        handle.abort();
+    // 等待一小段时间，让系统代理设置生效
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // 设置停止标志，拒绝所有新请求
+    {
+        let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+        if let Some(server) = &state.server {
+            server.shutdown();
+        }
     }
 
-    state.server = None;
-    state.log_receiver = None;
+    // 等待一小段时间，让正在处理的请求完成
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    Ok("代理服务器已停止".to_string())
+    // 从状态中提取 shutdown_sender 和 handle
+    let (shutdown_sender, handle) = {
+        let mut state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+
+        let shutdown_sender = state.shutdown_sender.take();
+        let handle = state.handle.take();
+
+        (shutdown_sender, handle)
+    }; // 锁在这里释放
+
+    // 发送停止信号
+    if let Some(shutdown_sender) = shutdown_sender {
+        println!("发送停止信号到代理服务器...");
+        // 发送停止信号（忽略错误，因为接收端可能已经关闭）
+        let _ = shutdown_sender.send(());
+    }
+
+    // 等待任务完成（带超时）
+    if let Some(handle) = handle {
+        // 等待任务完成，最多等待 3 秒
+        match tokio::time::timeout(std::time::Duration::from_secs(3), handle).await {
+            Ok(result) => {
+                if let Err(e) = result {
+                    eprintln!("代理服务器任务错误: {:?}", e);
+                }
+                println!("代理服务器任务已完成");
+            }
+            Err(_) => {
+                eprintln!("等待代理服务器停止超时");
+                println!("注意：某些浏览器或应用可能仍在尝试连接旧的代理");
+                println!("建议：重启浏览器以完全停止所有连接");
+            }
+        }
+    }
+
+    // 清理状态
+    {
+        let mut state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+        state.server = None;
+        state.log_receiver = None;
+    }
+
+    Ok("代理服务器已停止，系统代理已清除".to_string())
 }
 
 /// Tauri 命令：检查代理服务器是否正在运行
@@ -439,8 +500,16 @@ fn main() {
             RunEvent::Exit { .. } | RunEvent::ExitRequested { .. } => {
                 // 在应用退出前，自动调用恢复代理的逻辑，确保不会污染用户的系统设置
                 let _ = restore_system_proxy();
+
                 // 停止代理服务器
                 if let Ok(mut state) = PROXY_STATE.lock() {
+                    // 发送停止信号
+                    if let Some(shutdown_sender) = state.shutdown_sender.take() {
+                        println!("应用退出：发送停止信号到代理服务器...");
+                        let _ = shutdown_sender.send(());
+                    }
+
+                    // 中止任务（应用退出时不等待）
                     if let Some(handle) = state.handle.take() {
                         handle.abort();
                     }

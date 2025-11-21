@@ -76,11 +76,14 @@ pub struct ProxyLog {
 /// - CA 证书管理器（用于 HTTPS MITM）
 /// - 日志发送通道（用于将日志发送到 UI）
 /// - 拦截器（用于修改请求/响应）
+/// - 停止标志（用于优雅停止）
 pub struct ProxyServer {
     config: ProxyConfig,
     cert_manager: Arc<CertManager>,
     log_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<ProxyLog>>>>,
     interceptor: Arc<Interceptor>,
+    /// 停止标志，设置为 true 后代理将拒绝所有新请求
+    shutdown_flag: Arc<RwLock<bool>>,
 }
 
 impl ProxyServer {
@@ -100,7 +103,21 @@ impl ProxyServer {
             cert_manager,
             log_sender: Arc::new(RwLock::new(None)),
             interceptor,
+            shutdown_flag: Arc::new(RwLock::new(false)),
         })
+    }
+
+    /// 设置停止标志
+    ///
+    /// 设置后，代理服务器将拒绝所有新的请求
+    pub fn shutdown(&self) {
+        *self.shutdown_flag.write() = true;
+        println!("代理服务器停止标志已设置");
+    }
+
+    /// 检查是否已停止
+    pub fn is_shutdown(&self) -> bool {
+        *self.shutdown_flag.read()
     }
 
     /// 设置日志发送通道
@@ -174,6 +191,7 @@ impl ProxyServer {
             config: self.config.clone(),
             interceptor: Arc::clone(&self.interceptor),
             log_sender: Arc::clone(&self.log_sender),
+            shutdown_flag: Arc::clone(&self.shutdown_flag),
         };
 
         // 从证书管理器获取 CA 证书和私钥（PEM 格式）
@@ -219,6 +237,8 @@ struct ProxyHandler {
     config: ProxyConfig,
     interceptor: Arc<Interceptor>,
     log_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<ProxyLog>>>>,
+    /// 停止标志，当设置为 true 时拒绝所有新请求
+    shutdown_flag: Arc<RwLock<bool>>,
 }
 
 impl HttpHandler for ProxyHandler {
@@ -250,8 +270,26 @@ impl HttpHandler for ProxyHandler {
         req: Request<Body>,
     ) -> impl Future<Output = RequestOrResponse> + Send {
         let interceptor = Arc::clone(&self.interceptor);
+        let shutdown_flag = Arc::clone(&self.shutdown_flag);
 
         async move {
+            // ================================================================
+            // 重要！检查停止标志
+            // ================================================================
+            // 如果代理服务器已经收到停止信号，返回空响应
+            // 让浏览器显示 ERR_PROXY_CONNECTION_FAILED 错误
+            // ================================================================
+            if *shutdown_flag.read() {
+                println!("代理服务器已停止，拒绝新请求");
+                // 返回 502 Bad Gateway 空响应，让浏览器显示代理连接失败
+                return RequestOrResponse::Response(
+                    Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(Body::from(Full::new(Bytes::new())))
+                        .unwrap(),
+                );
+            }
+
             let method = req.method().clone();
             let uri = req.uri().clone();
 

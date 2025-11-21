@@ -22,6 +22,84 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use parking_lot::RwLock;
+use std::io::Read;
+
+/// 解压缩响应体
+///
+/// 根据 Content-Encoding 头部的值，自动解压缩响应体。
+/// 支持的编码格式：gzip, deflate, br (Brotli)
+///
+/// # 参数
+/// - `body`: 原始（可能是压缩的）响应体
+/// - `headers`: 响应头部，用于检查 Content-Encoding
+///
+/// # 返回
+/// - 解压缩后的响应体（如果未压缩，返回原始数据）
+fn decompress_body(body: &Bytes, headers: &HeaderMap) -> Bytes {
+    // 检查 Content-Encoding 头部
+    let encoding = headers
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    match encoding {
+        "gzip" => {
+            // 使用 flate2 解压 gzip
+            use flate2::read::GzDecoder;
+            let mut decoder = GzDecoder::new(&body[..]);
+            let mut decompressed = Vec::new();
+            match decoder.read_to_end(&mut decompressed) {
+                Ok(_) => {
+                    println!("成功解压 gzip 数据: {} 字节 -> {} 字节", body.len(), decompressed.len());
+                    Bytes::from(decompressed)
+                }
+                Err(e) => {
+                    eprintln!("解压 gzip 失败: {}, 返回原始数据", e);
+                    body.clone()
+                }
+            }
+        }
+        "deflate" => {
+            // 使用 flate2 解压 deflate
+            use flate2::read::DeflateDecoder;
+            let mut decoder = DeflateDecoder::new(&body[..]);
+            let mut decompressed = Vec::new();
+            match decoder.read_to_end(&mut decompressed) {
+                Ok(_) => {
+                    println!("成功解压 deflate 数据: {} 字节 -> {} 字节", body.len(), decompressed.len());
+                    Bytes::from(decompressed)
+                }
+                Err(e) => {
+                    eprintln!("解压 deflate 失败: {}, 返回原始数据", e);
+                    body.clone()
+                }
+            }
+        }
+        "br" => {
+            // 使用 brotli 解压 Brotli
+            let mut decompressed = Vec::new();
+            match brotli::BrotliDecompress(&mut &body[..], &mut decompressed) {
+                Ok(_) => {
+                    println!("成功解压 brotli 数据: {} 字节 -> {} 字节", body.len(), decompressed.len());
+                    Bytes::from(decompressed)
+                }
+                Err(e) => {
+                    eprintln!("解压 brotli 失败: {}, 返回原始数据", e);
+                    body.clone()
+                }
+            }
+        }
+        "" => {
+            // 没有压缩，返回原始数据
+            body.clone()
+        }
+        other => {
+            // 不支持的编码格式，返回原始数据
+            eprintln!("不支持的编码格式: {}, 返回原始数据", other);
+            body.clone()
+        }
+    }
+}
 
 /// 拦截规则
 ///
@@ -64,7 +142,7 @@ pub enum RuleType {
 /// 例如：如果只指定了 url_pattern，则只要 URL 匹配就触发。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchPattern {
-    /// URL 正则表达式模式（例如：`.*baidu\.com.*`）
+    /// URL 正则表达式模式（例如：`.*example\.com.*`）
     pub url_pattern: Option<String>,
     /// HTTP 方法（例如：`GET`, `POST`）
     pub method: Option<String>,
@@ -138,29 +216,107 @@ pub enum Action {
 ///
 /// 管理所有拦截规则，并在请求/响应通过时应用这些规则。
 /// 使用线程安全的 RwLock 保护规则列表，支持并发访问。
+/// 规则会自动持久化到 JSON 文件中。
 pub struct Interceptor {
     /// 拦截规则列表（使用读写锁保护，支持多线程并发读取）
     rules: Arc<RwLock<Vec<InterceptRule>>>,
+    /// 规则文件路径
+    rules_file_path: std::path::PathBuf,
 }
 
 impl Interceptor {
+    /// 获取规则文件保存路径
+    ///
+    /// 规则文件保存在用户的配置目录下：
+    /// - macOS/Linux: ~/.sysproxy/rules.json
+    /// - Windows: %APPDATA%\.sysproxy\rules.json
+    fn get_rules_file_path() -> std::path::PathBuf {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+
+        let config_dir = std::path::Path::new(&home).join(".sysproxy");
+
+        // 确保配置目录存在
+        let _ = std::fs::create_dir_all(&config_dir);
+
+        config_dir.join("rules.json")
+    }
+
     /// 创建新的拦截器实例
+    ///
+    /// 会自动从文件加载已保存的规则
     pub fn new() -> Self {
-        Self {
+        let rules_file_path = Self::get_rules_file_path();
+        let interceptor = Self {
             rules: Arc::new(RwLock::new(Vec::new())),
+            rules_file_path,
+        };
+
+        // 尝试从文件加载规则
+        if let Err(e) = interceptor.load_from_file() {
+            eprintln!("加载规则文件失败: {}", e);
         }
+
+        interceptor
+    }
+
+    /// 将规则保存到 JSON 文件
+    ///
+    /// 在添加、删除、更新或清空规则时会自动调用此方法
+    fn save_to_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let rules = self.rules.read();
+        let json = serde_json::to_string_pretty(&*rules)?;
+        std::fs::write(&self.rules_file_path, json)?;
+        println!("规则已保存到: {}", self.rules_file_path.display());
+        Ok(())
+    }
+
+    /// 从 JSON 文件加载规则
+    ///
+    /// 在应用启动时会自动调用此方法
+    fn load_from_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.rules_file_path.exists() {
+            println!("规则文件不存在，使用空规则列表");
+            return Ok(());
+        }
+
+        let json = std::fs::read_to_string(&self.rules_file_path)?;
+        let loaded_rules: Vec<InterceptRule> = serde_json::from_str(&json)?;
+
+        let mut rules = self.rules.write();
+        *rules = loaded_rules;
+
+        println!("从 {} 加载了 {} 条规则", self.rules_file_path.display(), rules.len());
+        Ok(())
     }
 
     /// 添加规则到拦截器
+    ///
+    /// 规则会自动保存到文件
     pub fn add_rule(&self, rule: InterceptRule) {
         let mut rules = self.rules.write();
         rules.push(rule);
+        drop(rules); // 释放锁以便保存
+
+        // 保存到文件
+        if let Err(e) = self.save_to_file() {
+            eprintln!("保存规则失败: {}", e);
+        }
     }
 
     /// 根据 ID 删除规则
+    ///
+    /// 规则会自动保存到文件
     pub fn remove_rule(&self, rule_id: &str) {
         let mut rules = self.rules.write();
         rules.retain(|r| r.id != rule_id);
+        drop(rules); // 释放锁以便保存
+
+        // 保存到文件
+        if let Err(e) = self.save_to_file() {
+            eprintln!("保存规则失败: {}", e);
+        }
     }
 
     /// 获取所有规则的副本
@@ -169,17 +325,33 @@ impl Interceptor {
     }
 
     /// 更新已存在的规则
+    ///
+    /// 规则会自动保存到文件
     pub fn update_rule(&self, rule: InterceptRule) {
         let mut rules = self.rules.write();
         if let Some(pos) = rules.iter().position(|r| r.id == rule.id) {
             rules[pos] = rule;
         }
+        drop(rules); // 释放锁以便保存
+
+        // 保存到文件
+        if let Err(e) = self.save_to_file() {
+            eprintln!("保存规则失败: {}", e);
+        }
     }
 
     /// 清空所有规则
+    ///
+    /// 规则会自动保存到文件
     pub fn clear_rules(&self) {
         let mut rules = self.rules.write();
         rules.clear();
+        drop(rules); // 释放锁以便保存
+
+        // 保存到文件
+        if let Err(e) = self.save_to_file() {
+            eprintln!("保存规则失败: {}", e);
+        }
     }
 
     /// 拦截并可能修改出站请求
@@ -388,6 +560,34 @@ impl Interceptor {
         Ok(())
     }
 
+    /// 将通配符模式转换为正则表达式
+    ///
+    /// 支持通配符语法：
+    /// - `*` 匹配任意字符（0个或多个）
+    /// - `?` 匹配单个字符
+    ///
+    /// 例如：`*example*` 会被转换为 `^.*example.*$`
+    /// 支持两种语法：
+    ///   - 通配符语法（推荐）：*example*、http://*/api/*、*.example.com
+    ///   - 正则表达式语法：.*example.*、http://[^/]+/api/.*、https?://.*\.example\.com
+    fn wildcard_to_regex(pattern: &str) -> String {
+        let mut regex = String::from("^");
+        for c in pattern.chars() {
+            match c {
+                '*' => regex.push_str(".*"),
+                '?' => regex.push('.'),
+                // 转义正则表达式特殊字符
+                '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
+                    regex.push('\\');
+                    regex.push(c);
+                }
+                _ => regex.push(c),
+            }
+        }
+        regex.push('$');
+        regex
+    }
+
     #[allow(dead_code)]
     fn matches_pattern(
         &self,
@@ -399,9 +599,25 @@ impl Interceptor {
     ) -> bool {
         // Check URL pattern
         if let Some(url_pattern) = &pattern.url_pattern {
-            if let Ok(regex) = Regex::new(url_pattern) {
-                let url = uri.to_string();
-                if !regex.is_match(&url) {
+            // 检测是否是通配符模式（包含 * 或 ?）
+            let regex_pattern = if url_pattern.contains('*') || url_pattern.contains('?') {
+                // 转换通配符为正则表达式
+                Self::wildcard_to_regex(url_pattern)
+            } else {
+                // 直接使用正则表达式
+                url_pattern.to_string()
+            };
+
+            match Regex::new(&regex_pattern) {
+                Ok(regex) => {
+                    let url = uri.to_string();
+                    if !regex.is_match(&url) {
+                        return false;
+                    }
+                }
+                Err(e) => {
+                    // 正则表达式无效，记录错误并让规则失效
+                    eprintln!("无效的 URL 匹配模式 '{}': {}", url_pattern, e);
                     return false;
                 }
             }
@@ -487,6 +703,15 @@ impl Interceptor {
 
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
 
+        // ================================================================
+        // 重要：解压缩响应体
+        // ================================================================
+        // HTTP 响应通常会使用 gzip、deflate 或 brotli 压缩。
+        // 如果直接保存压缩的数据，文件内容会是乱码。
+        // 这里根据 Content-Encoding 头部自动解压缩。
+        // ================================================================
+        let decompressed_body = decompress_body(response_body, response_headers);
+
         let mut data = format!("=== REQUEST [{}] ===\n", timestamp);
         data.push_str(&format!("{} {}\n", method, uri));
         data.push_str("Request Headers:\n");
@@ -506,8 +731,9 @@ impl Interceptor {
                 data.push_str(&format!("  {}: {}\n", key, val_str));
             }
         }
-        data.push_str("\nResponse Body:\n");
-        data.push_str(&String::from_utf8_lossy(response_body));
+        data.push_str("\nResponse Body (解压缩后):\n");
+        // 使用解压缩后的数据
+        data.push_str(&String::from_utf8_lossy(&decompressed_body));
         data.push_str("\n\n");
 
         if let Ok(mut file) = OpenOptions::new()
