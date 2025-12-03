@@ -35,7 +35,8 @@ type ProxyResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub struct ProxyConfig {
     /// 代理服务器监听端口（默认 8888）
     pub port: u16,
-    /// 是否启用 HTTPS 拦截（必须启用才能看到 HTTPS 流量）
+    /// 是否启用 HTTPS 拦截（MITM）
+    /// 如果为 false，代理只转发 HTTPS 流量而不解密
     pub enable_https_intercept: bool,
     /// 是否记录请求日志
     pub log_requests: bool,
@@ -45,7 +46,7 @@ impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             port: 8888,
-            enable_https_intercept: true,
+            enable_https_intercept: false,
             log_requests: true,
         }
     }
@@ -115,11 +116,6 @@ impl ProxyServer {
         println!("代理服务器停止标志已设置");
     }
 
-    /// 检查是否已停止
-    pub fn is_shutdown(&self) -> bool {
-        *self.shutdown_flag.read()
-    }
-
     /// 设置日志发送通道
     ///
     /// 这个通道用于将代理日志发送到 UI 界面显示
@@ -162,18 +158,11 @@ impl ProxyServer {
         }
     }
 
-    /// 内部方法：发送日志到通道
-    fn log_request(&self, log: ProxyLog) {
-        if let Some(sender) = self.log_sender.read().as_ref() {
-            let _ = sender.send(log);
-        }
-    }
-
     /// 启动代理服务器
     ///
     /// 这是代理服务器的主入口点。它会：
     /// 1. 创建 TCP 监听器（监听 127.0.0.1:port）
-    /// 2. 配置 CA 证书（用于 HTTPS MITM）
+    /// 2. 如果启用了 HTTPS 拦截，配置 CA 证书（用于 HTTPS MITM）
     /// 3. 创建 hudsucker 代理实例
     /// 4. 开始接受连接
     ///
@@ -185,6 +174,7 @@ impl ProxyServer {
         let addr = SocketAddr::from(([127, 0, 0, 1], self.config.port));
 
         println!("代理服务器启动在 {}", addr);
+        println!("HTTPS 拦截: {}", if self.config.enable_https_intercept { "已启用" } else { "已禁用" });
 
         // 创建 hudsucker 代理处理器，包含我们的自定义拦截逻辑
         let handler = ProxyHandler {
@@ -194,12 +184,16 @@ impl ProxyServer {
             shutdown_flag: Arc::clone(&self.shutdown_flag),
         };
 
+        // 构建代理服务器
         // 从证书管理器获取 CA 证书和私钥（PEM 格式）
+        // 注意：即使不启用 HTTPS 拦截，hudsucker 的构建器模式也需要提供 CA
+        // 这是由于 hudsucker 的类型状态机要求必须按顺序调用：
+        // with_addr() -> with_ca() -> with_rustls_connector() -> with_http_handler() -> build()
         let ca_cert_pem = self.cert_manager.get_ca_cert_pem()?;
         let ca_key_pem = self.cert_manager.get_ca_key_pem()?;
 
         // 解析密钥对并创建证书颁发者
-        // 这个颁发者将用于为每个 HTTPS 域名动态生成证书
+        // 这个颁发者将用于为每个 HTTPS 域名动态生成证书（当启用 HTTPS 拦截时）
         let key_pair = KeyPair::from_pem(&ca_key_pem)
             .map_err(|e| format!("解析密钥失败: {}", e))?;
         let issuer = Issuer::from_ca_cert_pem(&ca_cert_pem, key_pair)
@@ -211,12 +205,13 @@ impl ProxyServer {
         // - aws_lc_rs: 使用 AWS 的 libcrypto 实现
         let ca = RcgenAuthority::new(issuer, 1_000, aws_lc_rs::default_provider());
 
-        // 构建代理服务器
+        // 构建 hudsucker 代理实例
+        // 注意：必须按照特定顺序调用构建器方法，否则会出现编译错误
         let proxy = Proxy::builder()
-            .with_addr(addr)                                      // 监听地址
-            .with_ca(ca)                                          // CA 证书（用于 HTTPS）
-            .with_rustls_connector(aws_lc_rs::default_provider()) // TLS 连接器
-            .with_http_handler(handler)                           // 请求/响应处理器
+            .with_addr(addr)
+            .with_ca(ca)
+            .with_rustls_connector(aws_lc_rs::default_provider())
+            .with_http_handler(handler)
             .build()?;
 
         // 启动代理服务器（会一直运行）
