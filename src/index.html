@@ -372,6 +372,7 @@
     <div class="tabs">
       <button class="tab active" data-tab="server">代理服务器</button>
       <button class="tab" data-tab="system">系统代理</button>
+      <button class="tab" data-tab="process">进程过滤</button>
       <button class="tab" data-tab="certificate">证书管理</button>
       <button class="tab" data-tab="rules">拦截规则</button>
       <button class="tab" data-tab="logs">日志查看</button>
@@ -463,6 +464,68 @@
             </button>
           </label>
           <textarea id="current-text" rows="8" readonly></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- 进程过滤 -->
+    <div class="tab-content" id="tab-process">
+      <div class="card">
+        <h2>进程过滤设置</h2>
+        <div id="process-status" class="message" style="display: none"></div>
+
+        <p style="color: #6b7280; margin-bottom: 16px;">
+          设置只捕获特定进程的流量，类似 Reqable 的进程过滤功能。
+        </p>
+
+        <div class="form-group">
+          <label style="display: flex; align-items: center; gap: 10px">
+            <input type="checkbox" id="enable-process-filter" />
+            启用进程过滤
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label style="display: flex; align-items: center; gap: 10px">
+            <input type="checkbox" id="blacklist-mode" />
+            黑名单模式（勾选=黑名单，不勾选=白名单）
+          </label>
+          <small style="color: #6b7280; display: block; margin-top: 4px;">
+            白名单：只显示选中进程的流量<br>
+            黑名单：显示除选中进程外的所有流量
+          </small>
+        </div>
+
+        <div style="margin-bottom: 16px;">
+          <button class="btn btn-sm btn-primary" id="refresh-processes">
+            🔄 刷新进程列表
+          </button>
+          <button class="btn btn-sm btn-secondary" id="clear-process-filter">
+            清空选择
+          </button>
+        </div>
+
+        <div class="form-group">
+          <label>
+            系统进程列表（搜索或滚动选择）
+            <input
+              type="text"
+              id="process-search"
+              placeholder="搜索进程名称..."
+              style="margin-top: 8px;"
+            />
+          </label>
+        </div>
+
+        <div class="log-container" id="process-list-container" style="max-height: 400px;">
+          <div style="color: #6b7280;">加载进程列表...</div>
+        </div>
+
+        <div style="margin-top: 16px;">
+          <strong>已选择的进程：</strong>
+          <div id="selected-processes" style="margin-top: 8px;">
+            <span style="color: #6b7280;">暂无选择</span>
+          </div>
         </div>
       </div>
     </div>
@@ -1219,6 +1282,233 @@
       })
 
 
+      // Process filtering
+      let allProcesses = []
+      let selectedProcesses = new Set()
+      let processIcons = new Map() // Cache for process icons: name -> base64 data URL
+
+      // Get process icon (async, tries to extract real icon first, falls back to emoji)
+      async function getProcessIcon(name, exePath) {
+        // Check cache first
+        if (processIcons.has(name)) {
+          return processIcons.get(name)
+        }
+
+        // Try to extract real app icon
+        try {
+          const iconData = await invoke('get_app_icon', { exePath })
+          if (iconData) {
+            processIcons.set(name, iconData)
+            return iconData
+          }
+        } catch (e) {
+          console.log('Failed to extract icon for', name, e)
+        }
+
+        // Fallback to emoji icons
+        const icon = getEmojiIcon(name)
+        processIcons.set(name, icon)
+        return icon
+      }
+
+      // SVG icon cache: iconName -> data URL
+      const svgIconCache = new Map()
+
+      // Load SVG icon from file and convert to data URL
+      async function loadSvgIcon(iconName) {
+        // Check cache first
+        if (svgIconCache.has(iconName)) {
+          return svgIconCache.get(iconName)
+        }
+
+        try {
+          const response = await fetch(`/icons/${iconName}.svg`)
+          const svgText = await response.text()
+          const dataUrl = 'data:image/svg+xml;base64,' + btoa(svgText)
+          svgIconCache.set(iconName, dataUrl)
+          return dataUrl
+        } catch (e) {
+          console.error(`Failed to load SVG icon: ${iconName}`, e)
+          // Fallback to a simple placeholder
+          return 'data:image/svg+xml;base64,' + btoa(`
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2"/>
+            </svg>
+          `)
+        }
+      }
+
+      // Get SVG icon as fallback (async)
+      async function getEmojiIcon(name) {
+        // Helper/Renderer processes - gear icon
+        if (name.toLowerCase().includes('helper') || name.toLowerCase().includes('renderer')) {
+          return await loadSvgIcon('gear')
+        }
+
+        // Default app icon - terminal icon
+        return await loadSvgIcon('terminal')
+      }
+
+      // Load processes list
+      async function loadProcesses() {
+        try {
+          const processes = await invoke('get_system_processes_with_info')
+          allProcesses = processes
+          displayProcesses(processes)
+        } catch (e) {
+          showMessage('process-status', String(e), 'error')
+        }
+      }
+
+      // Display processes in list
+      async function displayProcesses(processes) {
+        const container = document.getElementById('process-list-container')
+
+        // Group by process name and collect info
+        const processMap = new Map()
+        processes.forEach(({pid, name, exe_path}) => {
+          if (!processMap.has(name)) {
+            processMap.set(name, {
+              pids: [],
+              exePath: exe_path
+            })
+          }
+          processMap.get(name).pids.push(pid)
+        })
+
+        // Sort by name
+        const sortedProcesses = Array.from(processMap.entries()).sort((a, b) => a[0].localeCompare(b[0]))
+
+        // First render with placeholders
+        container.innerHTML = sortedProcesses
+          .map(([name, {pids, exePath}]) => `
+            <div style="padding: 8px; border-bottom: 1px solid var(--border); cursor: pointer; display: flex; align-items: center; gap: 8px;"
+                 onclick="toggleProcessSelection('${name.replace(/'/g, "\\'")}')"
+                 data-process-name="${name}">
+              <input type="checkbox" ${selectedProcesses.has(name) ? 'checked' : ''}
+                     onchange="toggleProcessSelection('${name.replace(/'/g, "\\'")}')"
+                     onclick="event.stopPropagation()">
+              <span class="process-icon-${name.replace(/[^a-zA-Z0-9]/g, '_')}" style="font-size: 20px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;">⏳</span>
+              <div style="flex: 1;">
+                <div>
+                  <strong>${name}</strong>
+                  <span style="color: #6b7280; font-size: 11px; margin-left: 8px;">(${pids.length} 个实例)</span>
+                </div>
+                <div style="color: #6b7280; font-size: 11px; margin-top: 2px; word-break: break-all;">${exePath}</div>
+              </div>
+            </div>
+          `)
+          .join('')
+
+        // Load icons asynchronously
+        for (const [name, {exePath}] of sortedProcesses) {
+          const iconClass = `process-icon-${name.replace(/[^a-zA-Z0-9]/g, '_')}`
+          const icon = await getProcessIcon(name, exePath)
+
+          // Update icon in DOM
+          const iconElement = document.querySelector(`.${iconClass}`)
+          if (iconElement) {
+            if (icon.startsWith('data:image/')) {
+              // Real icon (base64 image)
+              iconElement.innerHTML = `<img src="${icon}" style="width: 24px; height: 24px; object-fit: contain;" alt="${name}">`
+            } else {
+              // Emoji icon
+              iconElement.textContent = icon
+            }
+          }
+        }
+      }
+
+      // Toggle process selection
+      window.toggleProcessSelection = function(processName) {
+        if (selectedProcesses.has(processName)) {
+          selectedProcesses.delete(processName)
+        } else {
+          selectedProcesses.add(processName)
+        }
+
+        // Update checkbox state
+        const checkbox = document.querySelector(`[data-process-name="${processName}"] input`)
+        if (checkbox) {
+          checkbox.checked = selectedProcesses.has(processName)
+        }
+
+        updateSelectedProcessesDisplay()
+        applyProcessFilter()
+      }
+
+      // Update selected processes display
+      function updateSelectedProcessesDisplay() {
+        const container = document.getElementById('selected-processes')
+        if (selectedProcesses.size === 0) {
+          container.innerHTML = '<span style="color: #6b7280;">暂无选择</span>'
+        } else {
+          container.innerHTML = Array.from(selectedProcesses)
+            .map(name => `
+              <span style="display: inline-block; padding: 4px 8px; margin: 4px; background: var(--bg-secondary); border-radius: 4px; font-size: 13px;">
+                ${name}
+                <button onclick="removeProcessSelection('${name}')" style="border: none; background: none; cursor: pointer; margin-left: 4px; color: var(--danger);">✕</button>
+              </span>
+            `)
+            .join('')
+        }
+      }
+
+      // Remove process from selection
+      window.removeProcessSelection = function(processName) {
+        selectedProcesses.delete(processName)
+        displayProcesses(allProcesses.filter(({name}) => {
+          const searchTerm = document.getElementById('process-search').value.toLowerCase()
+          return searchTerm === '' || name.toLowerCase().includes(searchTerm)
+        }))
+        updateSelectedProcessesDisplay()
+        applyProcessFilter()
+      }
+
+      // Apply process filter
+      async function applyProcessFilter() {
+        try {
+          const enabled = document.getElementById('enable-process-filter').checked
+          const blacklistMode = document.getElementById('blacklist-mode').checked
+
+          await invoke('set_process_filter', {
+            filter: {
+              enabled,
+              allowed_processes: Array.from(selectedProcesses),
+              blacklist_mode: blacklistMode
+            }
+          })
+        } catch (e) {
+          showMessage('process-status', String(e), 'error')
+        }
+      }
+
+      // Search processes
+      document.getElementById('process-search').addEventListener('input', (e) => {
+        const searchTerm = e.target.value.toLowerCase()
+        const filtered = allProcesses.filter(({name}) =>
+          name.toLowerCase().includes(searchTerm)
+        )
+        displayProcesses(filtered)
+      })
+
+      // Refresh processes button
+      document.getElementById('refresh-processes').addEventListener('click', loadProcesses)
+
+      // Clear process filter button
+      document.getElementById('clear-process-filter').addEventListener('click', () => {
+        selectedProcesses.clear()
+        displayProcesses(allProcesses)
+        updateSelectedProcessesDisplay()
+        applyProcessFilter()
+      })
+
+      // Enable/disable process filter
+      document.getElementById('enable-process-filter').addEventListener('change', applyProcessFilter)
+
+      // Blacklist mode toggle
+      document.getElementById('blacklist-mode').addEventListener('change', applyProcessFilter)
+
       // Logs
       const logContainer = document.getElementById('log-container')
       const logs = []
@@ -1275,6 +1565,7 @@
           refreshSaved()
           refreshCurrent()
           loadRules()
+          loadProcesses()
           setInterval(updateServerStatus, 2000)
         }
       })()

@@ -30,6 +30,8 @@ chrono = "0.4"
 ideamans-hudsucker = { version = "0.25", features = ["rcgen-ca", "rustls-client", "decoder"] }
 flate2 = "1.0"
 brotli = "3.3"
+sysinfo = "0.31"
+image = "0.25"
 
 [build-dependencies]
 tauri-build = { version = "2.5.1", features = [] }
@@ -43,3 +45,5 @@ windows = { version = "0.62.2", features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 system-configuration = "0.6"
 core-foundation = "0.9"
+libc = "0.2"
+sysinfo = "0.31"

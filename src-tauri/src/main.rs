@@ -5,6 +5,8 @@ mod cert;
 mod cert_installer;
 mod proxy;
 mod interceptor;
+mod process_filter;
+mod app_icon;
 
 use once_cell::sync::Lazy;
 use serde::Serialize;
@@ -17,6 +19,7 @@ use cert::CertManager;
 use cert_installer::CertInstaller;
 use proxy::{ProxyServer, ProxyConfig, ProxyLog};
 use interceptor::{Interceptor, InterceptRule};
+use process_filter::{ProcessFilter, ProcessFilterManager, ProcessInfo, get_running_processes, get_running_processes_with_info};
 
 /// 用于存储和序列化代理配置的结构体
 #[derive(Clone, Serialize, Debug, PartialEq)]
@@ -42,6 +45,7 @@ static LAST_EMITTED_PROXY: Lazy<Mutex<Option<SavedProxy>>> = Lazy::new(|| Mutex:
 struct ProxyServerState {
     server: Option<Arc<ProxyServer>>,
     interceptor: Arc<Interceptor>,
+    process_filter: Arc<ProcessFilterManager>,
     log_receiver: Option<mpsc::UnboundedReceiver<ProxyLog>>,
     handle: Option<tokio::task::JoinHandle<()>>,
     /// 停止信号发送端（用于优雅地停止代理服务器）
@@ -53,6 +57,7 @@ static PROXY_STATE: Lazy<Mutex<ProxyServerState>> = Lazy::new(|| {
     Mutex::new(ProxyServerState {
         server: None,
         interceptor: Arc::new(Interceptor::new()),
+        process_filter: Arc::new(ProcessFilterManager::new()),
         log_receiver: None,
         handle: None,
         shutdown_sender: None,
@@ -438,6 +443,82 @@ fn clear_intercept_rules() -> Result<(), String> {
     Ok(())
 }
 
+// ========== 进程过滤命令 ==========
+
+/// Tauri 命令：设置进程过滤器配置
+#[tauri::command]
+fn set_process_filter(filter: ProcessFilter) -> Result<(), String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.process_filter.set_filter(filter);
+    Ok(())
+}
+
+/// Tauri 命令：获取进程过滤器配置
+#[tauri::command]
+fn get_process_filter() -> Result<ProcessFilter, String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    Ok(state.process_filter.get_filter())
+}
+
+/// Tauri 命令：添加允许的进程
+#[tauri::command]
+fn add_allowed_process(process_name: String) -> Result<(), String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.process_filter.add_process(process_name);
+    Ok(())
+}
+
+/// Tauri 命令：移除允许的进程
+#[tauri::command]
+fn remove_allowed_process(process_name: String) -> Result<(), String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.process_filter.remove_process(&process_name);
+    Ok(())
+}
+
+/// Tauri 命令：清空所有允许的进程
+#[tauri::command]
+fn clear_allowed_processes() -> Result<(), String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.process_filter.clear_processes();
+    Ok(())
+}
+
+/// Tauri 命令：启用/禁用进程过滤
+#[tauri::command]
+fn set_process_filter_enabled(enabled: bool) -> Result<(), String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.process_filter.set_enabled(enabled);
+    Ok(())
+}
+
+/// Tauri 命令：设置黑名单/白名单模式
+#[tauri::command]
+fn set_process_filter_blacklist_mode(blacklist: bool) -> Result<(), String> {
+    let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
+    state.process_filter.set_blacklist_mode(blacklist);
+    Ok(())
+}
+
+/// Tauri 命令：获取系统中所有正在运行的进程
+#[tauri::command]
+fn get_system_processes() -> Result<Vec<(u32, String)>, String> {
+    Ok(get_running_processes())
+}
+
+/// Tauri 命令：获取系统中所有正在运行的进程（包含完整信息）
+#[tauri::command]
+fn get_system_processes_with_info() -> Result<Vec<ProcessInfo>, String> {
+    Ok(get_running_processes_with_info())
+}
+
+/// Tauri 命令：提取应用程序图标
+#[tauri::command]
+fn get_app_icon(exe_path: String) -> Option<String> {
+    app_icon::extract_app_icon(&exe_path)
+}
+
+
 fn main() {
     let app = Builder::default()
         .invoke_handler(generate_handler![
@@ -458,6 +539,16 @@ fn main() {
             get_intercept_rules,
             update_intercept_rule,
             clear_intercept_rules,
+            set_process_filter,
+            get_process_filter,
+            add_allowed_process,
+            remove_allowed_process,
+            clear_allowed_processes,
+            set_process_filter_enabled,
+            set_process_filter_blacklist_mode,
+            get_system_processes,
+            get_system_processes_with_info,
+            get_app_icon,
         ])
         .setup(|app| {
             // 在应用启动时，启动一个后台线程来监听系统代理的变化
