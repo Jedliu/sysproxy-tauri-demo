@@ -16,12 +16,14 @@
 // ============================================================================
 
 use std::path::Path;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::Command;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::Security::Cryptography::{
     CertAddEncodedCertificateToStore, CertCloseStore, CertOpenSystemStoreW, CERT_STORE_ADD_REPLACE_EXISTING,
-    CERT_SYSTEM_STORE_CURRENT_USER, X509_ASN_ENCODING,
+    X509_ASN_ENCODING,
 };
 
 #[cfg(target_os = "windows")]
@@ -98,14 +100,14 @@ impl CertInstaller {
 
             // Add certificate to store
             let result = CertAddEncodedCertificateToStore(
-                store,
+                Some(store),
                 X509_ASN_ENCODING,
                 &der,
                 CERT_STORE_ADD_REPLACE_EXISTING,
                 None,
             );
 
-            CertCloseStore(store, 0)?;
+            CertCloseStore(Some(store), 0)?;
 
             if result.is_ok() {
                 Ok("证书已成功安装到 Windows 受信任的根证书颁发机构".to_string())

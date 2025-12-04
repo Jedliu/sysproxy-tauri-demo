@@ -2,8 +2,28 @@
 ///
 /// 提供从应用程序路径提取图标并转换为 base64 的功能
 
-use std::path::Path;
-use std::process::Command;
+#[cfg(target_os = "macos")]
+use {
+    std::path::Path,
+    std::process::Command,
+};
+
+#[cfg(target_os = "windows")]
+use {
+    std::ffi::OsStr,
+    std::os::windows::ffi::OsStrExt,
+    std::{ffi::c_void, io::Cursor, mem},
+    base64::{engine::general_purpose::STANDARD, Engine as _},
+    image::{codecs::png::PngEncoder, ColorType, ImageEncoder},
+    windows::core::PCWSTR,
+    windows::Win32::Foundation::HWND,
+    windows::Win32::Graphics::Gdi::{
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS, HBITMAP,
+    },
+    windows::Win32::UI::Shell::ExtractIconExW,
+    windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO},
+};
 
 /// 从应用程序路径提取图标 (macOS)
 #[cfg(target_os = "macos")]
@@ -139,12 +159,121 @@ fn convert_icns_to_base64(icns_path: &str) -> Option<String> {
     Some(format!("data:image/png;base64,{}", base64_data))
 }
 
-/// Windows 平台的图标提取实现（占位）
+/// Windows 平台的应用图标提取
 #[cfg(target_os = "windows")]
-pub fn extract_app_icon(_exe_path: &str) -> Option<String> {
-    // TODO: 实现 Windows 图标提取
-    // 可以使用 Windows API 或第三方库
-    None
+pub fn extract_app_icon(exe_path: &str) -> Option<String> {
+    // 将 Windows 路径转换为 UTF-16 并结尾 0
+    let wide_path: Vec<u16> = OsStr::new(exe_path).encode_wide().chain(Some(0)).collect();
+
+    // 使用 ExtractIconExW 从 EXE 路径中拷贝大图标句柄
+    let mut hicon = HICON::default();
+    let extracted = unsafe { ExtractIconExW(PCWSTR(wide_path.as_ptr()), 0, Some(&mut hicon), None, 1) };
+    if extracted == 0 || hicon.is_invalid() {
+        return None;
+    }
+
+    // 转换为 base64 PNG 数据URL
+    let data_url = unsafe { icon_handle_to_data_url(hicon) };
+
+    // 释放图标句柄资源
+    unsafe {
+        let _ = DestroyIcon(hicon);
+    }
+
+    data_url
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn icon_handle_to_data_url(hicon: HICON) -> Option<String> {
+    let mut icon_info = ICONINFO::default();
+    if GetIconInfo(hicon, &mut icon_info).is_err() {
+        return None;
+    }
+    let hbm_color = icon_info.hbmColor;
+    let hbm_mask = icon_info.hbmMask;
+
+    // 获取图标尺寸和位深
+    let mut bmp = BITMAP::default();
+    if GetObjectW(
+        hbm_color.into(),
+        mem::size_of::<BITMAP>() as i32,
+        Some(&mut bmp as *mut _ as *mut c_void),
+    ) == 0
+    {
+        cleanup_bitmaps(hbm_color, hbm_mask);
+        return None;
+    }
+
+    let width = bmp.bmWidth.unsigned_abs();
+    let height = bmp.bmHeight.unsigned_abs();
+    if width == 0 || height == 0 {
+        cleanup_bitmaps(hbm_color, hbm_mask);
+        return None;
+    }
+
+    // 使用 GetDIBits 抽取 BGRA 像素
+    let mut bmi: BITMAPINFO = mem::zeroed();
+    bmi.bmiHeader = BITMAPINFOHEADER {
+        biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: bmp.bmWidth,
+        biHeight: -(bmp.bmHeight.abs()), // 让扫描行从上到下
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB.0,
+        ..Default::default()
+    };
+
+    let hdc = GetDC(Some(HWND::default()));
+    if hdc.0.is_null() {
+        cleanup_bitmaps(hbm_color, hbm_mask);
+        return None;
+    }
+
+    let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
+    let lines = GetDIBits(
+        hdc,
+        hbm_color,
+        0,
+        height,
+        Some(pixels.as_mut_ptr() as *mut c_void),
+        &mut bmi,
+        DIB_RGB_COLORS,
+    );
+    ReleaseDC(Some(HWND::default()), hdc);
+
+    if lines == 0 {
+        cleanup_bitmaps(hbm_color, hbm_mask);
+        return None;
+    }
+
+    // BGRA -> RGBA
+    for chunk in pixels.chunks_exact_mut(4) {
+        chunk.swap(0, 2);
+    }
+
+    cleanup_bitmaps(hbm_color, hbm_mask);
+
+    // 直接用 PNG 编码器输出 RGBA 缓冲区
+    let mut png_buf = Vec::new();
+    {
+        let mut cursor = Cursor::new(&mut png_buf);
+        let encoder = PngEncoder::new(&mut cursor);
+        encoder
+            .write_image(&pixels, width, height, ColorType::Rgba8.into())
+            .ok()?;
+    }
+
+    Some(format!("data:image/png;base64,{}", STANDARD.encode(png_buf)))
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn cleanup_bitmaps(hbm_color: HBITMAP, hbm_mask: HBITMAP) {
+    if !hbm_color.is_invalid() {
+        let _ = DeleteObject(hbm_color.into());
+    }
+    if !hbm_mask.is_invalid() {
+        let _ = DeleteObject(hbm_mask.into());
+    }
 }
 
 /// Linux 平台的图标提取实现（占位）

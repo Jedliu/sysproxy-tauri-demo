@@ -326,7 +326,7 @@ async fn stop_proxy_server() -> Result<String, String> {
         state.log_receiver = None;
     }
 
-    Ok("代理服务器已停止，系统代理已清除".to_string())
+    Ok("代理服务器已停止".to_string())
 }
 
 /// Tauri 命令：检查代理服务器是否正在运行
