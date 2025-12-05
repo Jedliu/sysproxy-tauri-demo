@@ -1528,10 +1528,14 @@
 
             const entry = document.createElement('div')
             entry.className = 'log-entry'
+
+            // 构建进程信息显示
+            const processInfo = log.process_name ? ` | Process: ${log.process_name}` : ''
+
             entry.innerHTML = `
               <div><strong>${log.timestamp}</strong> ${log.method} ${log.url}</div>
               <div style="color: #6b7280; font-size: 11px;">
-                Status: ${log.status} | Request: ${log.request_size}B | Response: ${log.response_size}B
+                Status: ${log.status} | Request: ${log.request_size}B | Response: ${log.response_size}B${processInfo}
               </div>
             `
 

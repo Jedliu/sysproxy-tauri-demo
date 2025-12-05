@@ -7,6 +7,7 @@ mod proxy;
 mod interceptor;
 mod process_filter;
 mod app_icon;
+mod socket_process;
 
 use once_cell::sync::Lazy;
 use serde::Serialize;
@@ -215,13 +216,13 @@ async fn start_proxy_server(port: u16, enable_https_intercept: bool) -> Result<S
         log_requests: true,
     };
 
-    // Get interceptor from global state
-    let interceptor = {
+    // Get interceptor and process_filter from global state
+    let (interceptor, process_filter) = {
         let state = PROXY_STATE.lock().map_err(|_| "无法锁定代理状态")?;
-        Arc::clone(&state.interceptor)
+        (Arc::clone(&state.interceptor), Arc::clone(&state.process_filter))
     };
 
-    let server = Arc::new(ProxyServer::new(config, interceptor).map_err(|e| format!("创建代理服务器失败: {}", e))?);
+    let server = Arc::new(ProxyServer::new(config, interceptor, process_filter).map_err(|e| format!("创建代理服务器失败: {}", e))?);
 
     // 重要：在启动服务器之前先检查端口是否可用
     // 这样可以在端口被占用时立即返回错误给前端，而不是在后台任务中才发现

@@ -14,6 +14,7 @@
 
 use crate::cert::CertManager;
 use crate::interceptor::Interceptor;
+use crate::process_filter::ProcessFilterManager;
 use bytes::Bytes;
 use hyper::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -68,6 +69,8 @@ pub struct ProxyLog {
     pub request_size: usize,
     /// 响应体大小（字节）
     pub response_size: usize,
+    /// 发起请求的进程名称
+    pub process_name: Option<String>,
 }
 
 /// 代理服务器
@@ -77,12 +80,14 @@ pub struct ProxyLog {
 /// - CA 证书管理器（用于 HTTPS MITM）
 /// - 日志发送通道（用于将日志发送到 UI）
 /// - 拦截器（用于修改请求/响应）
+/// - 进程过滤器（用于过滤特定进程的流量）
 /// - 停止标志（用于优雅停止）
 pub struct ProxyServer {
     config: ProxyConfig,
     cert_manager: Arc<CertManager>,
     log_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<ProxyLog>>>>,
     interceptor: Arc<Interceptor>,
+    process_filter: Arc<ProcessFilterManager>,
     /// 停止标志，设置为 true 后代理将拒绝所有新请求
     shutdown_flag: Arc<RwLock<bool>>,
 }
@@ -93,10 +98,15 @@ impl ProxyServer {
     /// # 参数
     /// - `config`: 代理服务器配置
     /// - `interceptor`: 用于拦截和修改请求/响应的拦截器
+    /// - `process_filter`: 用于过滤进程的过滤器
     ///
     /// # 返回
     /// 成功返回 ProxyServer 实例，失败返回错误信息
-    pub fn new(config: ProxyConfig, interceptor: Arc<Interceptor>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        config: ProxyConfig,
+        interceptor: Arc<Interceptor>,
+        process_filter: Arc<ProcessFilterManager>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let cert_manager = Arc::new(CertManager::new()?);
 
         Ok(Self {
@@ -104,6 +114,7 @@ impl ProxyServer {
             cert_manager,
             log_sender: Arc::new(RwLock::new(None)),
             interceptor,
+            process_filter,
             shutdown_flag: Arc::new(RwLock::new(false)),
         })
     }
@@ -180,6 +191,7 @@ impl ProxyServer {
         let handler = ProxyHandler {
             config: self.config.clone(),
             interceptor: Arc::clone(&self.interceptor),
+            process_filter: Arc::clone(&self.process_filter),
             log_sender: Arc::clone(&self.log_sender),
             shutdown_flag: Arc::clone(&self.shutdown_flag),
         };
@@ -231,6 +243,7 @@ impl ProxyServer {
 struct ProxyHandler {
     config: ProxyConfig,
     interceptor: Arc<Interceptor>,
+    process_filter: Arc<ProcessFilterManager>,
     log_sender: Arc<RwLock<Option<tokio::sync::mpsc::UnboundedSender<ProxyLog>>>>,
     /// 停止标志，当设置为 true 时拒绝所有新请求
     shutdown_flag: Arc<RwLock<bool>>,
@@ -265,7 +278,9 @@ impl HttpHandler for ProxyHandler {
         req: Request<Body>,
     ) -> impl Future<Output = RequestOrResponse> + Send {
         let interceptor = Arc::clone(&self.interceptor);
+        let process_filter = Arc::clone(&self.process_filter);
         let shutdown_flag = Arc::clone(&self.shutdown_flag);
+        let client_addr = _ctx.client_addr;
 
         async move {
             // ================================================================
@@ -288,7 +303,61 @@ impl HttpHandler for ProxyHandler {
             let method = req.method().clone();
             let uri = req.uri().clone();
 
-            println!("收到请求: {} {}", method, uri);
+            // ================================================================
+            // 进程过滤检查
+            // ================================================================
+            // 从客户端 socket 地址获取进程名称，并检查是否应该被过滤
+            // ================================================================
+            use crate::socket_process::get_process_name_from_socket;
+            let process_name = get_process_name_from_socket(&client_addr);
+
+            // 检查进程过滤器
+            let filter = process_filter.get_filter();
+            if filter.enabled {
+                // 调试信息
+                println!(
+                    "进程过滤调试 - 当前进程: {:?}, 允许列表: {:?}, 黑名单模式: {}",
+                    process_name, filter.allowed_processes, filter.blacklist_mode
+                );
+
+                let should_block = if let Some(ref name) = process_name {
+                    // 如果是黑名单模式，列表中的进程被拒绝
+                    // 如果是白名单模式，不在列表中的进程被拒绝
+                    if filter.blacklist_mode {
+                        filter.allowed_processes.contains(name)
+                    } else {
+                        !filter.allowed_processes.contains(name)
+                    }
+                } else {
+                    // 无法获取进程名，根据模式决定
+                    // 白名单模式：拒绝未知进程
+                    // 黑名单模式：允许未知进程
+                    !filter.blacklist_mode
+                };
+
+                if should_block {
+                    println!(
+                        "进程过滤：拒绝请求 {} {} (进程: {:?})",
+                        method, uri, process_name
+                    );
+                    return RequestOrResponse::Response(
+                        Response::builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .body(Body::from(Full::new(Bytes::from("Blocked by process filter"))))
+                            .unwrap(),
+                    );
+                } else {
+                    println!(
+                        "进程过滤：允许请求 {} {} (进程: {:?})",
+                        method, uri, process_name
+                    );
+                }
+            }
+
+            println!(
+                "收到请求: {} {} (进程: {:?})",
+                method, uri, process_name
+            );
 
             // ================================================================
             // 重要！不要拦截 CONNECT 请求！
@@ -404,10 +473,15 @@ impl HttpHandler for ProxyHandler {
         let log_sender = Arc::clone(&self.log_sender);
         let method = _ctx.request_method.clone();
         let uri = _ctx.request_uri.clone();
+        let client_addr = _ctx.client_addr;
 
         async move {
             let response_status = res.status().as_u16();
             let start_time = std::time::Instant::now();
+
+            // 获取进程名称
+            use crate::socket_process::get_process_name_from_socket;
+            let process_name = get_process_name_from_socket(&client_addr);
 
             // 创建空的请求上下文
             // 注意：hudsucker 在响应处理器中不提供请求体/头部
@@ -454,18 +528,20 @@ impl HttpHandler for ProxyHandler {
                         status: response_status,
                         request_size,
                         response_size,
+                        process_name: process_name.clone(),
                     });
                 }
 
                 // 输出日志到控制台
                 let elapsed = start_time.elapsed();
                 println!(
-                    "{} {} - {} ({} bytes, {:.2}ms)",
+                    "{} {} - {} ({} bytes, {:.2}ms) [进程: {:?}]",
                     method,
                     uri,
                     response_status,
                     response_size,
-                    elapsed.as_secs_f64() * 1000.0
+                    elapsed.as_secs_f64() * 1000.0,
+                    process_name
                 );
             }
 
