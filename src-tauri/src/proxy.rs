@@ -329,10 +329,10 @@ impl HttpHandler for ProxyHandler {
                         !filter.allowed_processes.contains(name)
                     }
                 } else {
-                    // 无法获取进程名，根据模式决定
-                    // 白名单模式：拒绝未知进程
-                    // 黑名单模式：允许未知进程
-                    !filter.blacklist_mode
+                    // 无法获取进程名时，允许流量通过
+                    // 这样可以避免因为系统限制导致所有流量被拦截
+                    // 如果需要严格控制，用户可以在获取到进程名后再启用过滤
+                    false
                 };
 
                 if should_block {

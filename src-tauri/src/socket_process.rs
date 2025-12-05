@@ -120,10 +120,12 @@ pub fn get_process_name_from_socket(client_addr: &SocketAddr) -> Option<String> 
 #[cfg(target_os = "windows")]
 pub fn get_process_name_from_socket(client_addr: &SocketAddr) -> Option<String> {
     let port = client_addr.port();
+    let client_ip = client_addr.ip().to_string();
 
     // 使用 netstat -ano 查找端口对应的 PID
-    let output = Command::new("netstat")
-        .args(&["-ano"])
+    // 使用 chcp 65001 确保输出是 UTF-8 编码
+    let output = Command::new("cmd")
+        .args(&["/C", "chcp 65001 >nul && netstat -ano"])
         .output()
         .ok()?;
 
@@ -134,23 +136,56 @@ pub fn get_process_name_from_socket(client_addr: &SocketAddr) -> Option<String> 
     let output_str = String::from_utf8_lossy(&output.stdout);
 
     // 查找匹配的行
+    // netstat 输出格式：
+    // TCP    127.0.0.1:54321        127.0.0.1:8888         ESTABLISHED     12345
+    // 我们需要匹配本地端口（source port）
     for line in output_str.lines() {
-        if line.contains(&format!(":{}", port)) && line.contains("ESTABLISHED") {
-            // 提取 PID（最后一列）
-            if let Some(pid_str) = line.split_whitespace().last() {
-                if let Ok(pid) = pid_str.parse::<u32>() {
-                    // 使用 tasklist 获取进程名
-                    let task_output = Command::new("tasklist")
-                        .args(&["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
-                        .output()
-                        .ok()?;
+        // 只处理 TCP 连接
+        if !line.trim().starts_with("TCP") {
+            continue;
+        }
 
-                    if task_output.status.success() {
-                        let task_str = String::from_utf8_lossy(&task_output.stdout);
-                        if let Some(first_line) = task_str.lines().next() {
-                            // CSV 格式：\"name\",\"pid\",\"session\",\"memory\"
-                            if let Some(name) = first_line.split(',').next() {
-                                let name = name.trim_matches('"');
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 5 {
+            continue;
+        }
+
+        // parts[1] 是本地地址 (127.0.0.1:54321)
+        // parts[2] 是远程地址 (127.0.0.1:8888)
+        // parts[3] 是状态 (ESTABLISHED)
+        // parts[4] 是 PID
+        let local_addr = parts[1];
+        let state = parts[3];
+        let pid_str = parts[4];
+
+        // 检查是否是 ESTABLISHED 状态
+        if state != "ESTABLISHED" {
+            continue;
+        }
+
+        // 检查本地地址是否匹配客户端地址
+        // 本地地址格式：127.0.0.1:54321 或 [::1]:54321
+        if local_addr.ends_with(&format!(":{}", port)) {
+            // 进一步检查 IP 是否匹配（如果不是 IPv6）
+            if !client_ip.contains(':') && !local_addr.starts_with(&client_ip) {
+                continue;
+            }
+
+            // 提取 PID
+            if let Ok(pid) = pid_str.parse::<u32>() {
+                // 使用 tasklist 获取进程名
+                let task_output = Command::new("tasklist")
+                    .args(&["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
+                    .output()
+                    .ok()?;
+
+                if task_output.status.success() {
+                    let task_str = String::from_utf8_lossy(&task_output.stdout);
+                    if let Some(first_line) = task_str.lines().next() {
+                        // CSV 格式：\"name\",\"pid\",\"session\",\"memory\"
+                        if let Some(name) = first_line.split(',').next() {
+                            let name = name.trim_matches('"').trim();
+                            if !name.is_empty() {
                                 return Some(name.to_string());
                             }
                         }
