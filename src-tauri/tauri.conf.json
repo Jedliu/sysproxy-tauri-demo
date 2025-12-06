@@ -7,6 +7,9 @@
     "frontendDist": "../src"
   },
   "bundle": {
+    "externalBin": [
+      "sidecar/verge-mihomo"
+    ],
     "icon": [
       "icons/icon.icns",
       "icons/icon.ico",

@@ -8,12 +8,15 @@ mod interceptor;
 mod process_filter;
 mod app_icon;
 mod socket_process;
+mod mihomo_config;
+mod privilege;
+mod mihomo_manager;
 
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use sysproxy::{Autoproxy, Sysproxy};
-use tauri::{generate_context, generate_handler, Builder, Emitter, RunEvent};
+use tauri::{generate_context, generate_handler, AppHandle, Builder, Emitter, RunEvent};
 use tokio::sync::mpsc;
 
 use cert::CertManager;
@@ -550,6 +553,13 @@ fn main() {
             get_system_processes,
             get_system_processes_with_info,
             get_app_icon,
+            // TUN 代理命令
+            start_tun_proxy,
+            stop_tun_proxy,
+            get_tun_status,
+            has_admin_privileges,
+            request_admin_restart,
+            update_tun_process_filter,
         ])
         .setup(|app| {
             // 在应用启动时，启动一个后台线程来监听系统代理的变化
@@ -592,6 +602,9 @@ fn main() {
             RunEvent::Exit { .. } | RunEvent::ExitRequested { .. } => {
                 // 在应用退出前，自动调用恢复代理的逻辑，确保不会污染用户的系统设置
                 let _ = restore_system_proxy();
+
+                // 停止 TUN 代理
+                let _ = stop_tun_proxy();
 
                 // 停止代理服务器
                 if let Ok(mut state) = PROXY_STATE.lock() {
@@ -839,4 +852,179 @@ fn proxy_config_file_path() -> Option<std::path::PathBuf> {
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn start_proxy_change_listener(_app_handle: tauri::AppHandle) {
     // 当前平台不支持代理变化监听
+}
+
+//
+// ============ TUN 代理相关命令 ============
+//
+
+/// Tauri 命令：启动 TUN 代理
+///
+/// # Returns
+/// * `Result<String, String>` - 成功返回状态消息，失败返回错误信息
+#[tauri::command]
+async fn start_tun_proxy(app_handle: AppHandle) -> Result<String, String> {
+    println!("[DEBUG] start_tun_proxy 被调用");
+
+    // 1. 检查 HTTP 代理是否已启动
+    if !is_proxy_server_running() {
+        println!("[DEBUG] HTTP 代理未运行");
+        return Err("请先启动 HTTP 代理服务器".to_string());
+    }
+    println!("[DEBUG] HTTP 代理正在运行");
+
+    // 2. 检查权限
+    if !privilege::has_admin_privileges() {
+        println!("[DEBUG] 当前无管理员权限，将使用 osascript 提权");
+    } else {
+        println!("[DEBUG] 当前已有管理员权限");
+    }
+
+    // 3. 获取进程过滤配置和实际代理端口
+    let (filter, proxy_port) = {
+        let state = PROXY_STATE
+            .lock()
+            .map_err(|_| "无法获取进程过滤配置".to_string())?;
+
+        let filter = state.process_filter.get_filter();
+
+        // 获取实际运行的代理服务器端口
+        let port = state.server
+            .as_ref()
+            .map(|s| s.get_port())
+            .unwrap_or(8888); // 如果服务器未运行，使用默认值
+
+        (filter, port)
+    };
+    println!("[DEBUG] 进程过滤配置：enabled={}, processes={}", filter.enabled, filter.allowed_processes.len());
+    println!("[DEBUG] HTTP 代理端口: {}", proxy_port);
+
+    // 4. 确保 mihomo 管理器已初始化 (lazy initialization)
+    let manager_arc = mihomo_manager::get_global_manager()
+        .map_err(|e| format!("获取 mihomo 管理器失败: {}", e))?;
+
+    let mut manager_guard = manager_arc.lock().await;
+    if manager_guard.is_none() {
+        println!("[DEBUG] mihomo 管理器未初始化，正在初始化...");
+        drop(manager_guard); // 释放锁
+        mihomo_manager::init_global_manager(&app_handle).await
+            .map_err(|e| format!("初始化 mihomo 管理器失败: {}", e))?;
+        manager_guard = manager_arc.lock().await;
+    }
+
+    // 5. 启动 mihomo
+    if let Some(manager) = &mut *manager_guard {
+        println!("[DEBUG] 正在启动 mihomo...");
+        manager
+            .start(&filter, proxy_port, true)
+            .await
+            .map_err(|e| {
+                println!("[ERROR] 启动 TUN 代理失败: {}", e);
+                format!("启动 TUN 代理失败: {}", e)
+            })?;
+
+        println!("[DEBUG] TUN 代理启动成功");
+        Ok("TUN 代理已启动".to_string())
+    } else {
+        println!("[ERROR] mihomo 管理器未初始化");
+        Err("mihomo 管理器未初始化".to_string())
+    }
+}
+
+/// Tauri 命令：停止 TUN 代理
+///
+/// # Returns
+/// * `Result<String, String>` - 成功返回状态消息，失败返回错误信息
+#[tauri::command]
+async fn stop_tun_proxy() -> Result<String, String> {
+    let manager_arc = mihomo_manager::get_global_manager()
+        .map_err(|e| format!("获取 mihomo 管理器失败: {}", e))?;
+
+    let manager_guard = manager_arc.lock().await;
+    if let Some(manager) = &*manager_guard {
+        manager
+            .stop()
+            .map_err(|e| format!("停止 TUN 代理失败: {}", e))?;
+
+        Ok("TUN 代理已停止".to_string())
+    } else {
+        Err("mihomo 管理器未初始化".to_string())
+    }
+}
+
+/// Tauri 命令：获取 TUN 状态
+///
+/// # Returns
+/// * `Result<String, String>` - 成功返回 JSON 格式的状态信息
+#[tauri::command]
+async fn get_tun_status() -> Result<String, String> {
+    let manager_arc = mihomo_manager::get_global_manager()
+        .map_err(|e| format!("获取 mihomo 管理器失败: {}", e))?;
+
+    let manager_guard = manager_arc.lock().await;
+    if let Some(manager) = &*manager_guard {
+        let status = manager
+            .get_status()
+            .await
+            .map_err(|e| format!("获取状态失败: {}", e))?;
+
+        serde_json::to_string(&status).map_err(|e| format!("序列化状态失败: {}", e))
+    } else {
+        Err("mihomo 管理器未初始化".to_string())
+    }
+}
+
+/// Tauri 命令：检查是否有管理员权限
+///
+/// # Returns
+/// * `bool` - true 表示有管理员权限
+#[tauri::command]
+fn has_admin_privileges() -> bool {
+    privilege::has_admin_privileges()
+}
+
+/// Tauri 命令：请求管理员权限并重启应用
+///
+/// # Returns
+/// * `Result<(), String>` - 成功则自动重启，失败返回错误信息
+#[tauri::command]
+fn request_admin_restart() -> Result<(), String> {
+    privilege::request_admin_restart()
+        .map_err(|e| e.to_string())
+}
+
+/// Tauri 命令：更新 TUN 进程过滤配置
+///
+/// 当进程过滤配置变更时，需要调用此命令同步到 mihomo
+#[tauri::command]
+async fn update_tun_process_filter() -> Result<(), String> {
+    let manager_arc = mihomo_manager::get_global_manager()
+        .map_err(|e| format!("获取 mihomo 管理器失败: {}", e))?;
+
+    let manager_guard = manager_arc.lock().await;
+    if let Some(manager) = &*manager_guard {
+        // 只有在 mihomo 正在运行时才需要更新
+        if !manager.is_running() {
+            return Ok(());
+        }
+
+        // 获取当前进程过滤配置
+        let filter = {
+            PROXY_STATE
+                .lock()
+                .map_err(|_| "无法获取进程过滤配置".to_string())?
+                .process_filter
+                .get_filter()
+        };
+
+        // 重新加载配置
+        manager
+            .reload_config(&filter, 8888, true)
+            .await
+            .map_err(|e| format!("更新进程过滤失败: {}", e))?;
+
+        Ok(())
+    } else {
+        Ok(()) // 管理器未初始化，不需要更新
+    }
 }

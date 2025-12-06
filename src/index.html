@@ -372,6 +372,7 @@
     <div class="tabs">
       <button class="tab active" data-tab="server">代理服务器</button>
       <button class="tab" data-tab="system">系统代理</button>
+      <button class="tab" data-tab="tun">TUN 代理</button>
       <button class="tab" data-tab="process">进程过滤</button>
       <button class="tab" data-tab="certificate">证书管理</button>
       <button class="tab" data-tab="rules">拦截规则</button>
@@ -464,6 +465,52 @@
             </button>
           </label>
           <textarea id="current-text" rows="8" readonly></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- TUN 代理 -->
+    <div class="tab-content" id="tab-tun">
+      <div class="card">
+        <h2>TUN 透明代理</h2>
+        <div id="tun-status" class="message" style="display: none"></div>
+
+        <div class="message info">
+          <strong>💡 什么是 TUN 模式？</strong><br>
+          TUN 模式在操作系统内核级别拦截网络流量，无需配置系统代理。<br>
+          适用于不支持代理配置的应用程序。<br><br>
+          <strong>⚠️ 注意事项：</strong><br>
+          • TUN 模式需要<strong>管理员权限</strong>（macOS 启动时会弹出密码对话框）<br>
+          • TUN 与系统代理可以同时运行（TUN 优先级更高）<br>
+          • 流量会先经过 TUN，然后转发到本地 HTTP 代理（端口 8888）<br>
+          • 进程过滤规则同时应用于 TUN 和系统代理模式
+        </div>
+
+        <div class="form-group">
+          <label>
+            TUN 状态
+            <span id="tun-status-badge" class="status-indicator status-stopped">● 未运行</span>
+          </label>
+        </div>
+
+        <div id="tun-info" class="cert-info" style="display: none;">
+          <div><strong>mihomo 版本:</strong> <span id="tun-version">-</span></div>
+          <div><strong>TUN 设备:</strong> <span id="tun-device">-</span></div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-success" id="start-tun">
+            启动 TUN 代理
+          </button>
+          <button class="btn btn-danger" id="stop-tun" disabled>
+            停止 TUN 代理
+          </button>
+        </div>
+
+        <div class="message info" style="margin-top: 20px;">
+          <strong>📊 工作原理</strong><br>
+          应用程序 → TUN 接口 (mihomo) → HTTP 代理服务器 (127.0.0.1:8888) → 目标服务器<br><br>
+          所有拦截规则、HTTPS MITM 和进程过滤功能都在 HTTP 代理层生效。
         </div>
       </div>
     </div>
@@ -1509,6 +1556,98 @@
       // Blacklist mode toggle
       document.getElementById('blacklist-mode').addEventListener('change', applyProcessFilter)
 
+      // TUN Proxy controls
+      async function updateTunStatus() {
+        if (!invoke) return
+
+        try {
+          const statusJson = await invoke('get_tun_status')
+          const status = JSON.parse(statusJson)
+          const badge = document.getElementById('tun-status-badge')
+          const infoDiv = document.getElementById('tun-info')
+          const startBtn = document.getElementById('start-tun')
+          const stopBtn = document.getElementById('stop-tun')
+
+          infoDiv.style.display = 'block'
+          document.getElementById('tun-version').textContent = status.version
+
+          // 根据平台显示 TUN 设备名
+          let deviceName = '-'
+          if (window.navigator.platform.includes('Mac')) {
+            deviceName = 'utun123'
+          } else if (window.navigator.platform.includes('Win')) {
+            deviceName = 'SysproxyTun'
+          } else if (window.navigator.platform.includes('Linux')) {
+            deviceName = 'sysproxy0'
+          }
+          document.getElementById('tun-device').textContent = deviceName
+
+          if (status.running && status.tun_enabled) {
+            badge.textContent = '● 运行中'
+            badge.className = 'status-indicator status-running'
+            startBtn.disabled = true
+            stopBtn.disabled = false
+          } else {
+            badge.textContent = '● 未运行'
+            badge.className = 'status-indicator status-stopped'
+            startBtn.disabled = false
+            stopBtn.disabled = true
+          }
+        } catch (e) {
+          console.error('Failed to check TUN status:', e)
+          // TUN 未运行时的错误是正常的
+          const badge = document.getElementById('tun-status-badge')
+          badge.textContent = '● 未运行'
+          badge.className = 'status-indicator status-stopped'
+
+          const startBtn = document.getElementById('start-tun')
+          const stopBtn = document.getElementById('stop-tun')
+          startBtn.disabled = false
+          stopBtn.disabled = true
+        }
+      }
+
+      document.getElementById('start-tun').addEventListener('click', async () => {
+        // 检查 HTTP 代理是否已启动
+        const httpRunning = await invoke('is_proxy_server_running')
+        if (!httpRunning) {
+          showMessage('tun-status', '请先启动 HTTP 代理服务器（在"代理服务器"标签页）', 'error')
+          return
+        }
+
+        try {
+          const result = await invoke('start_tun_proxy')
+          showMessage('tun-status', result, 'success')
+          await updateTunStatus()
+        } catch (e) {
+          showMessage('tun-status', String(e), 'error')
+        }
+      })
+
+      document.getElementById('stop-tun').addEventListener('click', async () => {
+        try {
+          const result = await invoke('stop_tun_proxy')
+          showMessage('tun-status', result, 'success')
+          await updateTunStatus()
+        } catch (e) {
+          showMessage('tun-status', String(e), 'error')
+        }
+      })
+
+      // 当进程过滤配置变更时，同步到 TUN
+      const originalApplyProcessFilter = applyProcessFilter
+      applyProcessFilter = async function() {
+        await originalApplyProcessFilter()
+
+        // 如果 TUN 正在运行，同步配置
+        try {
+          await invoke('update_tun_process_filter')
+        } catch (e) {
+          // 静默失败（TUN 未运行时会报错，这是正常的）
+          console.log('TUN process filter sync (ignored if TUN not running):', e)
+        }
+      }
+
       // Logs
       const logContainer = document.getElementById('log-container')
       const logs = []
@@ -1570,7 +1709,9 @@
           refreshCurrent()
           loadRules()
           loadProcesses()
+          updateTunStatus()
           setInterval(updateServerStatus, 2000)
+          setInterval(updateTunStatus, 3000) // Check TUN status every 3 seconds
         }
       })()
     </script>
