@@ -423,6 +423,56 @@
             停止代理服务器
           </button>
         </div>
+
+        <!-- 透明代理控制 -->
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #dee2e6;">
+          <h3 style="margin-bottom: 15px;">🔄 透明代理（Transparent Proxy）</h3>
+
+          <div class="message info" style="display: block; margin-bottom: 15px;">
+            <strong>⚠️ macOS 限制说明：</strong><br>
+            macOS 的 pf 防火墙<strong>无法重定向本机</strong>（localhost/127.0.0.1）发起的流量。<br>
+            <br>
+            <strong>本机应用请使用"系统代理"功能！</strong><br>
+            <br>
+            透明代理仅对以下场景有效：<br>
+            • 局域网其他设备（需配置网关为本机 IP）<br>
+            • Docker 容器/虚拟机流量<br>
+            <br>
+            <strong>推荐：</strong>使用上方的"系统代理"功能来代理本机流量。
+          </div>
+
+          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+            <span id="transparent-status" style="font-weight: 500; color: #6c757d;">
+              状态: 未启用
+            </span>
+          </div>
+
+          <div class="btn-group">
+            <button class="btn btn-primary" id="enable-transparent" onclick="enableTransparentProxy()">
+              启用透明代理
+            </button>
+            <button class="btn btn-secondary" id="disable-transparent" onclick="disableTransparentProxy()" disabled>
+              禁用透明代理
+            </button>
+            <button class="btn btn-secondary" id="check-transparent" onclick="checkTransparentProxy()">
+              检查状态
+            </button>
+          </div>
+
+          <div class="form-group" style="margin-top: 15px;">
+            <label>
+              当前 pf 规则
+              <button
+                class="btn btn-sm btn-secondary"
+                onclick="refreshTransparentRules()"
+                style="margin-left: 10px"
+              >
+                刷新
+              </button>
+            </label>
+            <textarea id="transparent-rules" rows="6" readonly style="font-family: monospace; font-size: 12px;"></textarea>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -817,6 +867,97 @@
           console.error('Failed to check server status:', e)
         }
       }
+
+      // ========== 透明代理相关函数 ==========
+
+      async function enableTransparentProxy() {
+        if (!invoke) return
+        try {
+          const port = parseInt(document.getElementById('proxy-port').value)
+          await invoke('enable_transparent_proxy', { proxyPort: port })
+          // 启用后更新状态（只需一次密码）
+          await updateTransparentProxyStatus()
+          alert('✅ 透明代理已启用\n\nHTTP (80) 和 HTTPS (443) 流量将自动通过代理服务器。')
+        } catch (e) {
+          alert('❌ 启用透明代理失败:\n\n' + e)
+        }
+      }
+
+      async function disableTransparentProxy() {
+        if (!invoke) return
+        try {
+          const port = parseInt(document.getElementById('proxy-port').value)
+          await invoke('disable_transparent_proxy', { proxyPort: port })
+          // 禁用后更新状态（不需要密码，因为规则已经不存在）
+          await updateTransparentProxyStatusWithoutAuth()
+          alert('✅ 透明代理已禁用')
+        } catch (e) {
+          alert('❌ 禁用透明代理失败:\n\n' + e)
+        }
+      }
+
+      // 更新透明代理状态（需要管理员权限）
+      async function updateTransparentProxyStatus() {
+        if (!invoke) return
+        try {
+          const port = parseInt(document.getElementById('proxy-port').value)
+
+          // 同时获取状态和规则（一次密码输入）
+          const [enabled, rules] = await Promise.all([
+            invoke('is_transparent_proxy_enabled', { proxyPort: port }),
+            invoke('get_transparent_proxy_rules', { proxyPort: port })
+          ])
+
+          updateStatusUI(enabled, rules)
+        } catch (e) {
+          console.error('Failed to update transparent proxy status:', e)
+        }
+      }
+
+      // 更新状态UI（禁用后不需要权限）
+      function updateTransparentProxyStatusWithoutAuth() {
+        updateStatusUI(false, null)
+      }
+
+      // 更新UI显示
+      function updateStatusUI(enabled, rules) {
+        const statusEl = document.getElementById('transparent-status')
+        const enableBtn = document.getElementById('enable-transparent')
+        const disableBtn = document.getElementById('disable-transparent')
+        const rulesTextarea = document.getElementById('transparent-rules')
+
+        if (enabled) {
+          statusEl.textContent = '状态: ✅ 已启用'
+          statusEl.style.color = '#28a745'
+          enableBtn.disabled = true
+          disableBtn.disabled = false
+        } else {
+          statusEl.textContent = '状态: ⭕ 未启用'
+          statusEl.style.color = '#6c757d'
+          enableBtn.disabled = false
+          disableBtn.disabled = true
+        }
+
+        if (rules) {
+          rulesTextarea.value = rules
+        } else {
+          rulesTextarea.value = '（无规则 / 透明代理未启用）'
+        }
+      }
+
+      async function checkTransparentProxy() {
+        await updateTransparentProxyStatus()
+      }
+
+      async function refreshTransparentRules() {
+        await updateTransparentProxyStatus()
+      }
+
+      // 将函数暴露到全局作用域，以便 onclick 属性可以访问
+      window.enableTransparentProxy = enableTransparentProxy
+      window.disableTransparentProxy = disableTransparentProxy
+      window.checkTransparentProxy = checkTransparentProxy
+      window.refreshTransparentRules = refreshTransparentRules
 
       document
         .getElementById('start-server')
@@ -1570,6 +1711,9 @@
           refreshCurrent()
           loadRules()
           loadProcesses()
+          // 不在初始化时检查透明代理状态，避免不必要的权限请求
+          // checkTransparentProxy()
+          // refreshTransparentRules()
           setInterval(updateServerStatus, 2000)
         }
       })()

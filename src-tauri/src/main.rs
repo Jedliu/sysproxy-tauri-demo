@@ -8,6 +8,7 @@ mod interceptor;
 mod process_filter;
 mod app_icon;
 mod socket_process;
+mod transparent_proxy;
 
 use once_cell::sync::Lazy;
 use serde::Serialize;
@@ -21,6 +22,7 @@ use cert_installer::CertInstaller;
 use proxy::{ProxyServer, ProxyConfig, ProxyLog};
 use interceptor::{Interceptor, InterceptRule};
 use process_filter::{ProcessFilter, ProcessFilterManager, ProcessInfo, get_running_processes, get_running_processes_with_info};
+use transparent_proxy::TransparentProxy;
 
 /// 用于存储和序列化代理配置的结构体
 #[derive(Clone, Serialize, Debug, PartialEq)]
@@ -519,6 +521,33 @@ fn get_app_icon(exe_path: String) -> Option<String> {
     app_icon::extract_app_icon(&exe_path)
 }
 
+/// Tauri 命令：启用透明代理
+#[tauri::command]
+fn enable_transparent_proxy(proxy_port: u16) -> Result<(), String> {
+    let transparent_proxy = TransparentProxy::new(proxy_port);
+    transparent_proxy.enable()
+}
+
+/// Tauri 命令：禁用透明代理
+#[tauri::command]
+fn disable_transparent_proxy(proxy_port: u16) -> Result<(), String> {
+    let transparent_proxy = TransparentProxy::new(proxy_port);
+    transparent_proxy.disable()
+}
+
+/// Tauri 命令：检查透明代理状态
+#[tauri::command]
+fn is_transparent_proxy_enabled(proxy_port: u16) -> bool {
+    let transparent_proxy = TransparentProxy::new(proxy_port);
+    transparent_proxy.is_enabled()
+}
+
+/// Tauri 命令：获取透明代理规则
+#[tauri::command]
+fn get_transparent_proxy_rules(proxy_port: u16) -> Option<String> {
+    let transparent_proxy = TransparentProxy::new(proxy_port);
+    transparent_proxy.get_rules()
+}
 
 fn main() {
     let app = Builder::default()
@@ -550,6 +579,10 @@ fn main() {
             get_system_processes,
             get_system_processes_with_info,
             get_app_icon,
+            enable_transparent_proxy,
+            disable_transparent_proxy,
+            is_transparent_proxy_enabled,
+            get_transparent_proxy_rules,
         ])
         .setup(|app| {
             // 在应用启动时，启动一个后台线程来监听系统代理的变化
